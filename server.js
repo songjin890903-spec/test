@@ -15,9 +15,9 @@ const jobs = new Map();
 
 // 场景类型对应的镜头数规则（集中定义，validatePlan 只接收 limits 对象）
 const SCENE_RULES = {
-  wuxi:  { minShots: 1, maxShots: 4 },
-  wenxi: { minShots: 5, maxShots: 7 },
-  mixed: { minShots: 5, maxShots: 7 },
+  wuxi:  { minShots: 3, maxShots: 6 },   // 武戏：少镜大冲击，每镜2-4秒
+  wenxi: { minShots: 6, maxShots: 8 },    // 文戏：多镜快节奏，每镜2秒
+  mixed: { minShots: 5, maxShots: 8 },    // 混合：居中
 };
 
 // 台词核验用的引号剥离正则（统一维护，避免各处不一致）
@@ -304,7 +304,7 @@ async function callAPI(systemPrompt, userMessage, config) {
           'anthropic-version': '2023-06-01'
         },
         body: JSON.stringify({
-          model: model || 'claude-opus-4-5-20251101',
+          model: model || 'claude-sonnet-4-6',
           max_tokens: 8192,
           system: systemPrompt,
           messages
@@ -485,9 +485,9 @@ function buildPlanPrompt(scene, costumeCard, dialogues) {
   p += `⛔ 规划铁律：\n`;
   p += `1. 除最后一个片段外，每个片段镜号时长之和必须=15秒。\n`;
   if (hasDirectorShots) {
-    p += `2. 导演讲戏模式：每片段镜头数3-10个（导演指令多需要更多镜头空间）。\n`;
+    p += `2. 导演讲戏模式：每片段镜头数5-10个，目标每镜2秒左右（1.5-2.5秒），最长不超过3秒。\n`;
   } else {
-    p += `2. 文戏/混合场景每片段镜头数5-7个；武戏≤4个。\n`;
+    p += `2. 文戏/混合场景每片段镜头数6-8个，每镜目标2秒（1.5-2.5秒），最长不超3秒；武戏每片段3-6个，每镜2-4秒，冲击感优先。\n`;
   }
   p += `3. 台词镜号规则（两层）：\n`;
   p += `   · ≤3秒台词：一个镜号拍完，不用切。\n`;
@@ -549,12 +549,16 @@ function buildPlanPrompt(scene, costumeCard, dialogues) {
 
   p += `请严格按以下JSON格式输出，不要任何其他文字或代码块标记：\n`;
   p += `{"segments":[{"id":"${scene.id}A","title":"片段标题","duration":15,"shots":[\n`;
-  p += `  {"num":1,"duration":3,"focal":"85mm","task":"台词起始：角色开口说话","dialogue":"台词原文放这里，无台词留空字符串"},\n`;
-  p += `  {"num":2,"duration":2,"focal":"50mm","task":"切镜：换角度/反打听者反应","dialogue":""},\n`;
-  p += `  {"num":3,"duration":3,"focal":"85mm","task":"声画分离：XX的OS/台词继续，画面切王龙恐惧反应","dialogue":""},\n`;
-  p += `  {"num":4,"duration":2,"focal":"35mm","task":"声画分离：XX的OS/台词继续，画面切空景环境","dialogue":""}\n`;
+  p += `  {"num":1,"duration":2,"focal":"85mm","task":"台词起始：角色开口说话","dialogue":"台词原文放这里，无台词留空字符串"},\n`;
+  p += `  {"num":2,"duration":2,"focal":"50mm","task":"反应：听者表情变化","dialogue":""},\n`;
+  p += `  {"num":3,"duration":2,"focal":"85mm","task":"切镜：换角度继续台词","dialogue":""},\n`;
+  p += `  {"num":4,"duration":2,"focal":"35mm","task":"声画分离：XX的OS/台词继续，画面切听者反应","dialogue":""},\n`;
+  p += `  {"num":5,"duration":2,"focal":"85mm","task":"动作：角色的关键动作","dialogue":""},\n`;
+  p += `  {"num":6,"duration":2.5,"focal":"50mm","task":"反应：另一角色反应","dialogue":""},\n`;
+  p += `  {"num":7,"duration":2.5,"focal":"35mm","task":"环境/全景收尾","dialogue":""}\n`;
   p += `],"tailFrame":"出场景别和视角"}]}\n`;
-  p += `⚠️ 注意：>3秒台词必须像示范那样拆成多个镜号（起始+切镜/声画分离），禁止把长台词塞进单个镜号。\n\n`;
+  p += `⚠️ 每镜目标时长2秒左右（1.5-2.5秒），最长不超过3秒。15秒÷2秒≈7个镜号，不要做成4-5个3秒大镜。\n`;
+  p += `⚠️ >3秒台词必须拆成多个镜号（起始+切镜/声画分离），禁止把长台词塞进单个镜号。\n\n`;
 
   p += `【场景信息】\n`;
   p += `场景编号：${scene.id}\n`;
@@ -628,8 +632,8 @@ function validatePlan(plan, dialogues, limits, minSegments) {
       errors.push(`${seg.id}：末片段总时长${total}秒，超过15秒上限，必须拆分`);
     }
     // 单镜号时长上限
-    // 导演模式放宽到8秒（导演可能要求长镜头/贴地推进），其他模式5秒
-    const shotMaxDur = isDirectorMode ? 8 : (limits === SCENE_RULES.wuxi) ? 4 : 5;
+    // 导演模式5秒（导演可能要求长镜头），武戏4秒，文戏/混合3秒
+    const shotMaxDur = isDirectorMode ? 5 : (limits === SCENE_RULES.wuxi) ? 4 : 3;
     for (const shot of shots) {
       if (shot.duration > shotMaxDur) {
         errors.push(`${seg.id} 镜${shot.num}：单镜${shot.duration}秒超上限${shotMaxDur}秒`);
@@ -764,7 +768,13 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
   }
 
   p += `【场景信息】\n`;
-  p += `@${scene.characters.join(' @')} @${scene.location || '场景地点'}\n\n`;
+  p += `@${scene.characters.join(' @')} @${scene.location || '场景地点'}\n`;
+  p += `场景标题：${scene.header || ''}\n`;
+  p += `本场共${totalSegs}个片段，当前是第${segIndex + 1}个。\n`;
+  if (segIndex > 0) {
+    p += `⚠️ A部分必须与第一个片段完全一致——同一场景、同一地点、同一时间，物理参数不变。直接复制第一个片段的A部分。\n`;
+  }
+  p += `⚠️ C部分禁止出现"导演""Agent""批注""强调"等内部术语。直接描写画面，不要说"导演强调的XX"。\n\n`;
   p += `═══ AGENT_A 批注剧本（按规划施工，参考导演讲戏细节）═══\n${scene.content}\n\n`;
   if (costumeCard && costumeCard.trim()) {
     p += `═══ AGENT_B 服化道卡 ═══\n${costumeCard}\n\n`;
@@ -811,7 +821,7 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
 
   // 导演讲戏模式：放宽镜头数限制 + 计算最少片段数
   const limits = hasDirectorShots
-    ? { minShots: 3, maxShots: 10 }
+    ? { minShots: 5, maxShots: 10 }
     : (SCENE_RULES[scene.sceneType] || SCENE_RULES.mixed);
 
   let minSegments = 1;
@@ -865,66 +875,112 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
     return await processSceneSingleShot(scene, costumeCard, config, job, sceneIndex, systemPrompt, dialogues);
   }
 
-  // ── 第二步：并行写作所有片段 ───────────────────────────────
-  // 尾帧从规划的 tailFrame 字段取，无需等待上一片段实际输出
-  // 所有片段可以同时开写，速度比串行快 N 倍
+  // ── 第二步：确定A部分参数（只生成一次），再并行写所有片段 ───────
+
+  // 提取A部分的辅助函数
+  function extractASection(text) {
+    const match = text.match(/【A】画面物理系统[：:]?\n?([\s\S]*?)(?=\n【B】)/);
+    return match ? match[0].trim() : null;
+  }
+
+  // 尝试从服化道卡提取A部分（Agent B 路径）
+  let referenceA = null;
+  if (costumeCard && costumeCard.trim()) {
+    // B的服化道卡里应该有【画面物理系统】
+    const fromB = costumeCard.match(/【画面物理系统】\n?([\s\S]*?)(?=\n【|$)/);
+    if (fromB) {
+      referenceA = '【A】画面物理系统：\n' + fromB[1].trim();
+      console.log(`✓ ${scene.id} A部分来源：Agent B 服化道卡（${referenceA.length}字）`);
+    }
+  }
+
+  // 没有B → 用AI生成一次A部分
+  if (!referenceA) {
+    job.progress[sceneIndex] = {
+      sceneId: scene.id, status: 'processing',
+      message: '生成画面物理系统参数...'
+    };
+    try {
+      const aPrompt = `请为以下场景生成【A】画面物理系统参数。只输出A部分，不要B/C/D/E/F。\n`
+        + `格式：不加方括号，参数用·分隔，包含：画风·影像质感·材质·光·氛围·渲染。\n`
+        + `字数限制：≤200字。\n\n`
+        + `场景信息：${scene.header || scene.id}\n`
+        + `场景类型：${scene.sceneType === 'wuxi' ? '武戏' : scene.sceneType === 'wenxi' ? '文戏' : '混合'}\n`
+        + `出场角色：${scene.characters.join('、') || '见剧本'}\n\n`
+        + `剧本内容摘要（前500字）：\n${scene.content.slice(0, 500)}\n`;
+      const aResult = await callAPI(systemPrompt, aPrompt, config);
+      // 清理可能的多余内容
+      referenceA = aResult.includes('【A】') ? extractASection(aResult) || aResult.trim() : '【A】画面物理系统：\n' + aResult.trim();
+      console.log(`✓ ${scene.id} A部分来源：AI生成（${referenceA.length}字）`);
+    } catch (err) {
+      console.warn(`⚠️ ${scene.id} A部分生成失败，片段自行生成：${err.message}`);
+    }
+  }
+
+  // 单片段写作+验证的通用流程
+  async function writeAndVerifySegment(seg, si, refA) {
+    const prevTailFrame = si === 0 ? '' : (plan.segments[si - 1].tailFrame || '');
+    let segPrompt = buildSegmentPrompt(
+      scene, seg, costumeCard, prevTailFrame, si, plan.segments.length
+    );
+    // 注入参考A部分
+    if (refA) {
+      segPrompt += `\n\n【A部分参数（必须原样使用，不得修改）】\n${refA}\n`;
+    }
+
+    let segOutput = await callAPI(systemPrompt, segPrompt, config);
+
+    // 台词核验 + 补写
+    const segDialogues = (seg.shots || []).map(s => s.dialogue).filter(Boolean);
+    if (segDialogues.length > 0) {
+      const missing = verifyDialogues(segDialogues, segOutput);
+      if (missing.length > 0) {
+        segOutput = await repairMissingDialogues(missing, segOutput, systemPrompt, config);
+        console.log(`✓ ${seg.id} 台词补写完成`);
+      } else {
+        console.log(`✓ ${seg.id} 台词核验通过`);
+      }
+    }
+    // 字数检查
+    const charCount = segOutput.replace(/<analysis>[\s\S]*?<\/analysis>/g, '').trim().length;
+    if (charCount > 1800) {
+      console.warn(`⚠️ ${seg.id} 字数 ${charCount}，超出 ${charCount - 1800} 字`);
+    } else {
+      console.log(`✓ ${seg.id} 字数 ${charCount}，合格`);
+    }
+    // 时长验证
+    const shotDurMatches = segOutput.match(/镜\d+\s+(\d+(?:\.\d+)?)\s*s/g) || [];
+    const actualTotal = shotDurMatches.reduce((sum, m) => {
+      const d = parseFloat(m.match(/(\d+(?:\.\d+)?)\s*s/)[1]);
+      return sum + d;
+    }, 0);
+    const plannedTotal = (seg.shots || []).reduce((s, sh) => s + (sh.duration || 0), 0);
+    if (actualTotal > 0 && actualTotal > 15.5) {
+      console.warn(`⚠️ ${seg.id} 实际总时长 ${actualTotal}s 超过15秒铁律上限`);
+    } else if (actualTotal > 0 && Math.abs(actualTotal - plannedTotal) > 2) {
+      console.warn(`⚠️ ${seg.id} 实际总时长 ${actualTotal}s ≠ 规划 ${plannedTotal}s（差${Math.abs(actualTotal - plannedTotal).toFixed(1)}s）`);
+    } else if (actualTotal > 0) {
+      console.log(`✓ ${seg.id} 时长 ${actualTotal}s，合格`);
+    }
+    return segOutput;
+  }
+
+  // 并行写所有片段（全部带参考A部分）
   job.progress[sceneIndex] = {
     sceneId: scene.id, status: 'processing',
     message: `并行写作 ${plan.segments.length} 个片段...`
   };
 
-  const segmentPromises = plan.segments.map((seg, si) => {
-    // 从规划对象取上一片段尾帧，第一个片段为空
-    const prevTailFrame = si === 0 ? '' : (plan.segments[si - 1].tailFrame || '');
-
-    const segPrompt = buildSegmentPrompt(
-      scene, seg, costumeCard, prevTailFrame, si, plan.segments.length
-    );
-
-    return callAPI(systemPrompt, segPrompt, config).then(async segOutput => {
-      // 台词核验 + 补写
-      const segDialogues = (seg.shots || []).map(s => s.dialogue).filter(Boolean);
-      if (segDialogues.length > 0) {
-        const missing = verifyDialogues(segDialogues, segOutput);
-        if (missing.length > 0) {
-          segOutput = await repairMissingDialogues(missing, segOutput, systemPrompt, config);
-          console.log(`✓ ${seg.id} 台词补写完成`);
-        } else {
-          console.log(`✓ ${seg.id} 台词核验通过`);
-        }
-      }
-      // 字数检查（1800字是即梦/Sora的硬限制）
-      const charCount = segOutput.replace(/<analysis>[\s\S]*?<\/analysis>/g, '').trim().length;
-      if (charCount > 1800) {
-        console.warn(`⚠️ ${seg.id} 字数 ${charCount}，超出 ${charCount - 1800} 字（需要在规划阶段多分片段）`);
-      } else {
-        console.log(`✓ ${seg.id} 字数 ${charCount}，合格`);
-      }
-      // 实际镜号时长验证（从输出中提取"镜X  Xs"格式）
-      const shotDurMatches = segOutput.match(/镜\d+\s+(\d+(?:\.\d+)?)\s*s/g) || [];
-      const actualTotal = shotDurMatches.reduce((sum, m) => {
-        const d = parseFloat(m.match(/(\d+(?:\.\d+)?)\s*s/)[1]);
-        return sum + d;
-      }, 0);
-      const plannedTotal = (seg.shots || []).reduce((s, sh) => s + (sh.duration || 0), 0);
-      if (actualTotal > 0 && actualTotal > 15.5) {
-        console.warn(`⚠️ ${seg.id} 实际总时长 ${actualTotal}s 超过15秒铁律上限`);
-      } else if (actualTotal > 0 && Math.abs(actualTotal - plannedTotal) > 2) {
-        console.warn(`⚠️ ${seg.id} 实际总时长 ${actualTotal}s ≠ 规划 ${plannedTotal}s（差${Math.abs(actualTotal - plannedTotal).toFixed(1)}s）`);
-      } else if (actualTotal > 0) {
-        console.log(`✓ ${seg.id} 时长 ${actualTotal}s，合格`);
-      }
-      return segOutput;
-    });
-  });
-
-  // Promise.allSettled：单个片段失败不影响其他片段结果
-  const results = await Promise.allSettled(segmentPromises);
-  const outputs = results.map((result, si) => {
+  const segmentPromises = plan.segments.map((seg, si) =>
+    writeAndVerifySegment(seg, si, referenceA).catch(err => {
+      console.error(`❌ ${seg.id} 写作失败: ${err.message}`);
+      return `[${seg.id} 生成失败: ${err.message}]`;
+    })
+  );
+  const segResults = await Promise.allSettled(segmentPromises);
+  const outputs = segResults.map((result, si) => {
     if (result.status === 'fulfilled') return result.value;
-    const errMsg = result.reason?.message || '未知错误';
-    console.error(`❌ ${plan.segments[si].id} 写作失败: ${errMsg}`);
-    return `[${plan.segments[si].id} 生成失败: ${errMsg}]`;
+    return `[${plan.segments[si].id} 生成失败]`;
   });
 
   // 生成 scene_plan 块，供前端规划卡和片段核对使用

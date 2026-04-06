@@ -150,7 +150,19 @@ textarea { resize: vertical; min-height: 80px; }
       </div>
       <div>
         <label>模型</label>
-        <input type="text" id="model" placeholder="claude-opus-4-5-20251101">
+        <select id="model" onchange="onModelChange()">
+          <optgroup label="Anthropic Claude" id="modelGroupClaude">
+            <option value="claude-sonnet-4-6">Claude Sonnet 4.6（推荐）</option>
+            <option value="claude-opus-4-6">Claude Opus 4.6</option>
+            <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5</option>
+          </optgroup>
+          <optgroup label="OpenAI 兼容" id="modelGroupOai" style="display:none">
+            <option value="deepseek-chat">DeepSeek Chat</option>
+            <option value="deepseek-reasoner">DeepSeek Reasoner</option>
+          </optgroup>
+          <option value="_custom">自定义...</option>
+        </select>
+        <input type="text" id="modelCustom" class="hidden" placeholder="输入自定义模型名" style="margin-top:6px">
       </div>
     </div>
     <div class="form-row">
@@ -349,10 +361,13 @@ let directState = {
 // 工具函数
 // ============================================================
 function getConfig() {
+  const modelSel = document.getElementById('model').value;
+  const modelCustom = document.getElementById('modelCustom').value.trim();
+  const model = modelSel === '_custom' ? (modelCustom || undefined) : modelSel;
   return {
     apiKey: document.getElementById('apiKey').value.trim(),
     apiType: document.getElementById('apiType').value,
-    model: document.getElementById('model').value.trim() || undefined,
+    model: model,
     apiUrl: document.getElementById('apiUrl').value.trim() || undefined
   };
 }
@@ -392,7 +407,24 @@ function switchMode(mode) {
 function onApiTypeChange() {
   const isOai = document.getElementById('apiType').value === 'openai';
   document.getElementById('apiUrlWrap').classList.toggle('hidden', !isOai);
-  document.getElementById('model').placeholder = isOai ? 'deepseek-chat' : 'claude-opus-4-5-20251101';
+  // 切换模型下拉框的选项组
+  document.getElementById('modelGroupClaude').style.display = isOai ? 'none' : '';
+  document.getElementById('modelGroupOai').style.display = isOai ? '' : 'none';
+  // 自动选中对应组的第一个选项
+  document.getElementById('model').value = isOai ? 'deepseek-chat' : 'claude-sonnet-4-6';
+  document.getElementById('modelCustom').classList.add('hidden');
+}
+
+function onModelChange() {
+  const sel = document.getElementById('model');
+  const customInput = document.getElementById('modelCustom');
+  if (sel.value === '_custom') {
+    customInput.classList.remove('hidden');
+    customInput.focus();
+  } else {
+    customInput.classList.add('hidden');
+    customInput.value = '';
+  }
 }
 
 // ============================================================
