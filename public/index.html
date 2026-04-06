@@ -1,0 +1,1276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>视频提示词生成工具</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #0f1117; color: #e0e0e0; min-height: 100vh; }
+
+.container { max-width: 960px; margin: 0 auto; padding: 20px 16px 60px; }
+h1 { font-size: 22px; font-weight: 600; text-align: center; margin: 20px 0 8px; color: #fff; }
+.subtitle { text-align: center; font-size: 13px; color: #888; margin-bottom: 24px; }
+
+/* 模式选择 */
+.mode-selector { display: flex; gap: 8px; margin-bottom: 20px; border-radius: 10px; background: #1a1d27; padding: 4px; }
+.mode-btn { flex: 1; padding: 12px 8px; border: none; background: transparent; color: #888; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; transition: all .2s; }
+.mode-btn.active { background: #2d5af0; color: #fff; }
+.mode-btn:hover:not(.active) { color: #ccc; background: #252830; }
+
+/* 卡片 */
+.card { background: #1a1d27; border: 1px solid #2a2d38; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+.card-title { font-size: 14px; font-weight: 600; color: #ccc; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+.card-title .step { background: #2d5af0; color: #fff; font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+.card-title .done { background: #22c55e; }
+
+/* 表单元素 */
+label { display: block; font-size: 12px; color: #999; margin-bottom: 4px; font-weight: 500; }
+input, select, textarea { width: 100%; padding: 10px 12px; border: 1px solid #2a2d38; border-radius: 8px; background: #12141c; color: #e0e0e0; font-size: 13px; font-family: inherit; }
+input:focus, select:focus, textarea:focus { outline: none; border-color: #2d5af0; }
+textarea { resize: vertical; min-height: 80px; }
+.form-row { display: flex; gap: 10px; margin-bottom: 10px; }
+.form-row > div { flex: 1; }
+
+/* 按钮 */
+.btn { padding: 10px 20px; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all .15s; font-family: inherit; }
+.btn-primary { background: #2d5af0; color: #fff; }
+.btn-primary:hover { background: #3b66f5; }
+.btn-primary:disabled { background: #333; color: #666; cursor: not-allowed; }
+.btn-success { background: #22c55e; color: #fff; }
+.btn-success:hover { background: #16a34a; }
+.btn-outline { background: transparent; border: 1px solid #2a2d38; color: #ccc; }
+.btn-outline:hover { background: #252830; }
+.btn-danger { background: #ef4444; color: #fff; }
+.btn-sm { padding: 6px 14px; font-size: 12px; }
+.btn-group { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+
+/* 文件上传 */
+.file-upload { border: 2px dashed #2a2d38; border-radius: 10px; padding: 24px; text-align: center; cursor: pointer; transition: all .2s; position: relative; }
+.file-upload:hover { border-color: #2d5af0; background: rgba(45,90,240,0.05); }
+.file-upload input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.file-upload .icon { font-size: 28px; margin-bottom: 6px; }
+.file-upload .hint { font-size: 12px; color: #888; }
+.file-name { font-size: 12px; color: #22c55e; margin-top: 6px; }
+
+/* 结果展示 */
+.result-box { background: #12141c; border: 1px solid #2a2d38; border-radius: 8px; padding: 16px; max-height: 500px; overflow-y: auto; font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; }
+.result-box::-webkit-scrollbar { width: 6px; }
+.result-box::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+
+/* 进度 */
+.progress-bar { background: #12141c; border-radius: 6px; height: 6px; overflow: hidden; margin: 8px 0; }
+.progress-fill { height: 100%; background: linear-gradient(90deg, #2d5af0, #22c55e); transition: width .3s; border-radius: 6px; }
+.progress-text { font-size: 12px; color: #888; }
+.progress-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 12px; }
+.progress-item .dot { width: 8px; height: 8px; border-radius: 50%; }
+.dot-pending { background: #444; }
+.dot-processing { background: #f59e0b; animation: pulse 1s infinite; }
+.dot-done { background: #22c55e; }
+.dot-error { background: #ef4444; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+/* 状态提示 */
+.status { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin: 10px 0; }
+.status-info { background: rgba(45,90,240,0.1); border: 1px solid rgba(45,90,240,0.3); color: #93b4ff; }
+.status-success { background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.3); color: #86efac; }
+.status-error { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: #fca5a5; }
+.status-loading { background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.3); color: #fcd34d; }
+
+/* 验算状态标签 */
+.check-bar { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px; background: rgba(34,197,94,0.06); border: 1px solid rgba(34,197,94,0.15); border-radius: 6px; margin: 6px 0; }
+.check-item { font-size: 11px; padding: 2px 8px; border-radius: 4px; display: flex; align-items: center; gap: 3px; }
+.check-ok { background: rgba(34,197,94,0.12); color: #86efac; }
+.check-warn { background: rgba(245,158,11,0.12); color: #fcd34d; }
+.check-fail { background: rgba(239,68,68,0.12); color: #fca5a5; }
+
+.hidden { display: none !important; }
+
+/* 映射卡片 */
+.map-card { background: #12141c; border: 1px solid #2a2d38; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+.map-card.low-conf { border-color: rgba(245,158,11,0.4); }
+.map-card.no-match { border-color: rgba(239,68,68,0.3); }
+.map-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.map-type { font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
+.map-type-feel { background: rgba(59,130,246,0.2); color: #93c5fd; }
+.map-type-intent { background: rgba(168,85,247,0.2); color: #d8b4fe; }
+.map-type-inner { background: rgba(34,197,94,0.2); color: #86efac; }
+.map-type-forbid { background: rgba(239,68,68,0.2); color: #fca5a5; }
+.map-type-global { background: rgba(245,158,11,0.2); color: #fcd34d; }
+.map-conf { font-size: 10px; padding: 2px 6px; border-radius: 4px; }
+.map-conf-high { background: rgba(34,197,94,0.1); color: #86efac; }
+.map-conf-medium { background: rgba(245,158,11,0.1); color: #fcd34d; }
+.map-conf-low { background: rgba(239,68,68,0.1); color: #fca5a5; }
+.map-text { font-size: 12px; color: #ccc; line-height: 1.5; margin-bottom: 6px; white-space: pre-wrap; }
+.map-reason { font-size: 11px; color: #666; font-style: italic; }
+.map-scene-select { padding: 4px 8px; border: 1px solid #2a2d38; border-radius: 6px; background: #1a1d27; color: #e0e0e0; font-size: 12px; min-width: 140px; }
+
+/* 场景列表 */
+.scene-list { max-height: 200px; overflow-y: auto; }
+.scene-item { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; border-radius: 6px; font-size: 12px; margin-bottom: 4px; }
+.scene-item:nth-child(odd) { background: rgba(255,255,255,0.02); }
+.scene-tag { font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
+.tag-wenxi { background: rgba(59,130,246,0.2); color: #93c5fd; }
+.tag-wuxi { background: rgba(239,68,68,0.2); color: #fca5a5; }
+.tag-mixed { background: rgba(168,85,247,0.2); color: #d8b4fe; }
+
+/* 流程指示器 */
+.flow-steps { display: flex; align-items: center; gap: 4px; margin-bottom: 16px; font-size: 11px; color: #666; flex-wrap: wrap; }
+.flow-step { padding: 4px 10px; border-radius: 12px; background: #1a1d27; border: 1px solid #2a2d38; }
+.flow-step.active { background: #2d5af0; color: #fff; border-color: #2d5af0; }
+.flow-step.completed { background: rgba(34,197,94,0.15); color: #86efac; border-color: rgba(34,197,94,0.3); }
+.flow-arrow { color: #444; }
+
+/* 编辑器 */
+.editable-result { background: #12141c; border: 1px solid #2a2d38; border-radius: 8px; padding: 16px; min-height: 200px; max-height: 500px; overflow-y: auto; font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; }
+.editable-result:focus { outline: none; border-color: #2d5af0; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🎬 视频提示词生成工具</h1>
+  <p class="subtitle">Agent A 剧本分析（AI自动/导演讲戏）→ Agent C 分镜提示词</p>
+
+  <!-- 模式选择 -->
+  <div class="mode-selector">
+    <button class="mode-btn active" onclick="switchMode('agentA')" id="modeAgentA">原始剧本 → 全流程</button>
+    <button class="mode-btn" onclick="switchMode('direct')" id="modeDirect">批注剧本 → 直接生成</button>
+  </div>
+
+  <!-- API 设置 -->
+  <div class="card">
+    <div class="card-title">⚙️ API 设置</div>
+    <div class="form-row">
+      <div>
+        <label>API 类型</label>
+        <select id="apiType" onchange="onApiTypeChange()">
+          <option value="anthropic">Anthropic Claude</option>
+          <option value="openai">OpenAI 兼容</option>
+        </select>
+      </div>
+      <div>
+        <label>模型</label>
+        <input type="text" id="model" placeholder="claude-opus-4-5-20251101">
+      </div>
+    </div>
+    <div class="form-row">
+      <div style="flex:2">
+        <label>API Key</label>
+        <input type="password" id="apiKey" placeholder="sk-...">
+      </div>
+      <div id="apiUrlWrap" class="hidden">
+        <label>API URL</label>
+        <input type="text" id="apiUrl" placeholder="https://api.deepseek.com/v1/chat/completions">
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== Agent A 流程 ==================== -->
+  <div id="agentAFlow">
+
+    <!-- 流程指示器 -->
+    <div class="flow-steps" id="agentASteps">
+      <span class="flow-step active" id="stepUpload">① 上传剧本</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-step hidden" id="stepMapping">② 映射预览</span>
+      <span class="flow-arrow hidden" id="arrowAfterMapping">→</span>
+      <span class="flow-step" id="stepSoulCard">② 剧魂定位卡</span>
+      <span class="flow-arrow" id="arrowAfterSoulCard">→</span>
+      <span class="flow-step" id="stepAnnotate">③ 逐场景批注</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-step" id="stepGenerate">④ 提示词生成</span>
+    </div>
+
+    <!-- 步骤1：上传原始剧本 -->
+    <div class="card" id="agentA_upload">
+      <div class="card-title"><span class="step">步骤 1</span> 上传原始剧本</div>
+      <div class="file-upload" id="agentAFileZone">
+        <input type="file" id="agentAFileInput" accept=".txt,.docx" onchange="handleAgentAUpload(this)">
+        <div class="icon">📄</div>
+        <div>点击或拖拽上传原始剧本</div>
+        <div class="hint">支持 .txt / .docx</div>
+        <div class="file-name hidden" id="agentAFileName"></div>
+      </div>
+      <div id="agentAUploadStatus"></div>
+
+      <!-- 分析模式选择 -->
+      <div class="hidden" id="analysisModeWrap" style="margin-top:12px;">
+        <label>分析模式</label>
+        <div style="display:flex;gap:6px;margin-top:4px;">
+          <button class="btn btn-sm active" id="modeAI" onclick="setAnalysisMode('ai')"
+            style="flex:1;padding:10px 8px;border:1px solid #2a2d38;border-radius:8px;font-size:12px;background:#2d5af0;color:#fff;cursor:pointer;">
+            🤖 AI 自动分析
+          </button>
+          <button class="btn btn-sm" id="modeDirector" onclick="setAnalysisMode('director')"
+            style="flex:1;padding:10px 8px;border:1px solid #2a2d38;border-radius:8px;font-size:12px;background:transparent;color:#888;cursor:pointer;">
+            🎬 导演讲戏
+          </button>
+        </div>
+        <p style="font-size:11px;color:#666;margin-top:6px;" id="analysisModeHint">AI 将用剧作方法论自动分析剧本，生成批注</p>
+      </div>
+
+      <!-- 导演讲戏输入区（仅导演模式显示） -->
+      <div class="hidden" id="directorNotesWrap" style="margin-top:12px;">
+        <label>导演讲戏文本（录音转文字）</label>
+        <div style="display:flex;gap:6px;margin-bottom:6px;">
+          <button class="btn btn-outline btn-sm" onclick="document.getElementById('directorFileInput').click()" style="font-size:11px;">📄 上传 .txt</button>
+          <input type="file" id="directorFileInput" accept=".txt" style="display:none;" onchange="handleDirectorFileUpload(this)">
+          <span class="file-name hidden" id="directorFileName" style="font-size:11px;align-self:center;"></span>
+        </div>
+        <textarea id="directorNotesInput" rows="5" placeholder="粘贴导演讲戏文本，或上传 .txt 文件...&#10;&#10;支持口语化内容，AI 会自动识别并映射到剧本对应位置。&#10;四种形态：场景感受 / 镜头意图 / 人物情绪 / 禁止项"></textarea>
+        <div id="directorNotesStatus"></div>
+      </div>
+
+      <div class="btn-group">
+        <button class="btn btn-primary" onclick="handleStep1Next()" id="btnStep1Next" disabled>生成剧魂定位卡</button>
+      </div>
+    </div>
+
+    <!-- 步骤2（导演模式）：映射预览 -->
+    <div class="card hidden" id="agentA_mapping">
+      <div class="card-title"><span class="step">步骤 2</span> 讲戏映射预览</div>
+      <div id="mappingStatus"></div>
+      <div id="mappingSummary" class="hidden" style="margin-bottom:10px;"></div>
+      <div id="mappingList" style="max-height:500px;overflow-y:auto;"></div>
+      <div class="btn-group hidden" id="mappingActions">
+        <button class="btn btn-success" onclick="confirmMapping()">✓ 确认映射，开始批注</button>
+        <button class="btn btn-outline" onclick="redoMapping()">重新映射</button>
+      </div>
+    </div>
+
+    <!-- 步骤2（AI模式）/ 步骤3（导演模式）：剧魂定位卡 -->
+    <div class="card hidden" id="agentA_soulCard">
+      <div class="card-title"><span class="step">步骤 2</span> 剧魂定位卡</div>
+      <div id="soulCardStatus"></div>
+      <div class="editable-result" id="soulCardContent" contenteditable="true" style="display:none"></div>
+      <p style="font-size:11px;color:#666;margin-top:6px;" id="soulCardEditHint" class="hidden">可直接编辑定位卡内容，确认后进入批注阶段</p>
+      <div class="btn-group" id="soulCardActions" class="hidden">
+        <button class="btn btn-success" onclick="confirmSoulCard()">✓ 确认，开始批注</button>
+        <button class="btn btn-outline" onclick="regenerateSoulCard()">重新生成</button>
+      </div>
+    </div>
+
+    <!-- 步骤3：批注 -->
+    <div class="card hidden" id="agentA_annotate">
+      <div class="card-title"><span class="step">步骤 3</span> 逐场景批注</div>
+      <div id="annotateStatus"></div>
+      <div class="result-box hidden" id="annotateResult" style="max-height:400px;"></div>
+      <div class="btn-group hidden" id="annotateActions">
+        <button class="btn btn-success" onclick="proceedToGenerate()">→ 进入提示词生成</button>
+        <button class="btn btn-outline btn-sm" onclick="downloadAnnotation()">下载批注剧本</button>
+        <button class="btn btn-outline btn-sm" onclick="copyAnnotation()">复制批注内容</button>
+      </div>
+    </div>
+
+    <!-- 步骤4：提示词生成（复用直接模式逻辑） -->
+    <div class="card hidden" id="agentA_generate">
+      <div class="card-title"><span class="step">步骤 4</span> 提示词生成</div>
+      <div id="agentA_sceneInfo"></div>
+      <div style="margin-top:10px;">
+        <label>服化道卡（可选，粘贴 Agent B 输出）</label>
+        <textarea id="costumeCardA" rows="3" placeholder="如有 Agent B 的服化道卡输出，粘贴在此处..."></textarea>
+      </div>
+      <div class="btn-group">
+        <button class="btn btn-primary" onclick="startGenerateFromAgentA()" id="btnGenerateA">开始生成提示词</button>
+      </div>
+      <div id="agentA_generateProgress" class="hidden"></div>
+      <div id="agentA_generateResult" class="hidden"></div>
+    </div>
+  </div>
+
+  <!-- ==================== 直接模式 ==================== -->
+  <div id="directFlow" class="hidden">
+
+    <!-- 上传批注剧本 -->
+    <div class="card">
+      <div class="card-title">📤 上传批注版剧本</div>
+      <div class="file-upload">
+        <input type="file" id="directFileInput" accept=".txt,.docx" onchange="handleDirectUpload(this)">
+        <div class="icon">📄</div>
+        <div>点击或拖拽上传批注版剧本</div>
+        <div class="hint">支持 .txt / .docx（需包含"场景X-X"格式标题）</div>
+        <div class="file-name hidden" id="directFileName"></div>
+      </div>
+      <div id="directUploadStatus"></div>
+    </div>
+
+    <!-- 场景列表 -->
+    <div class="card hidden" id="directScenes">
+      <div class="card-title">📋 识别到的场景</div>
+      <div class="scene-list" id="directSceneList"></div>
+    </div>
+
+    <!-- 服化道卡 + 生成 -->
+    <div class="card hidden" id="directGenerate">
+      <div class="card-title">🎭 服化道卡 & 生成</div>
+      <label>服化道卡（可选）</label>
+      <textarea id="costumeCardD" rows="3" placeholder="如有 Agent B 的服化道卡输出，粘贴在此处..."></textarea>
+      <div class="btn-group">
+        <button class="btn btn-primary" onclick="startDirectGenerate()" id="btnGenerateD">开始生成提示词</button>
+      </div>
+    </div>
+
+    <!-- 生成进度 & 结果 -->
+    <div class="card hidden" id="directProgress">
+      <div class="card-title">⏳ 生成进度</div>
+      <div id="directProgressList"></div>
+    </div>
+
+    <div class="card hidden" id="directResults">
+      <div class="card-title">📝 生成结果</div>
+      <div id="directResultList"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// 全局状态
+// ============================================================
+let currentMode = 'agentA';
+let agentAState = {
+  scriptText: null,
+  soulCard: null,
+  annotatedScript: null,
+  scenes: null,
+  annotateJobId: null,
+  generateJobId: null,
+  analysisMode: 'ai',  // 'ai' or 'director'
+  directorNotes: null,
+  mappedSegments: null,  // 映射结果
+  sceneOptions: null     // 场景列表供下拉选择
+};
+let directState = {
+  scenes: null,
+  jobId: null
+};
+
+// ============================================================
+// 工具函数
+// ============================================================
+function getConfig() {
+  return {
+    apiKey: document.getElementById('apiKey').value.trim(),
+    apiType: document.getElementById('apiType').value,
+    model: document.getElementById('model').value.trim() || undefined,
+    apiUrl: document.getElementById('apiUrl').value.trim() || undefined
+  };
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function showStatus(containerId, type, msg) {
+  document.getElementById(containerId).innerHTML =
+    `<div class="status status-${type}">${escapeHtml(msg)}</div>`;
+}
+
+function clearStatus(containerId) {
+  document.getElementById(containerId).innerHTML = '';
+}
+
+function setStepState(stepId, state) {
+  const el = document.getElementById(stepId);
+  el.classList.remove('active', 'completed');
+  if (state) el.classList.add(state);
+}
+
+// ============================================================
+// 模式切换
+// ============================================================
+function switchMode(mode) {
+  currentMode = mode;
+  document.getElementById('modeAgentA').classList.toggle('active', mode === 'agentA');
+  document.getElementById('modeDirect').classList.toggle('active', mode === 'direct');
+  document.getElementById('agentAFlow').classList.toggle('hidden', mode !== 'agentA');
+  document.getElementById('directFlow').classList.toggle('hidden', mode !== 'direct');
+}
+
+function onApiTypeChange() {
+  const isOai = document.getElementById('apiType').value === 'openai';
+  document.getElementById('apiUrlWrap').classList.toggle('hidden', !isOai);
+  document.getElementById('model').placeholder = isOai ? 'deepseek-chat' : 'claude-opus-4-5-20251101';
+}
+
+// ============================================================
+// Agent A 流程
+// ============================================================
+
+// 步骤1：上传原始剧本
+async function handleAgentAUpload(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const nameEl = document.getElementById('agentAFileName');
+  nameEl.textContent = `已选择：${file.name}`;
+  nameEl.classList.remove('hidden');
+
+  showStatus('agentAUploadStatus', 'info', '正在解析文件...');
+  const form = new FormData();
+  form.append('file', file);
+  try {
+    const res = await fetch('/api/agent-a/upload', { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    agentAState.scriptText = data.scriptText;
+    showStatus('agentAUploadStatus', 'success', `解析成功：${data.charCount} 字，${data.sceneCount} 个场景`);
+    // 显示模式选择器
+    document.getElementById('analysisModeWrap').classList.remove('hidden');
+    updateStep1Button();
+  } catch (err) {
+    showStatus('agentAUploadStatus', 'error', err.message);
+  }
+  input.value = '';
+}
+
+// 分析模式切换
+function setAnalysisMode(mode) {
+  agentAState.analysisMode = mode;
+  const aiBtn = document.getElementById('modeAI');
+  const dirBtn = document.getElementById('modeDirector');
+  const hintEl = document.getElementById('analysisModeHint');
+  const notesWrap = document.getElementById('directorNotesWrap');
+  const btnNext = document.getElementById('btnStep1Next');
+
+  if (mode === 'ai') {
+    aiBtn.style.background = '#2d5af0'; aiBtn.style.color = '#fff';
+    dirBtn.style.background = 'transparent'; dirBtn.style.color = '#888';
+    hintEl.textContent = 'AI 将用剧作方法论自动分析剧本，生成批注';
+    notesWrap.classList.add('hidden');
+    // AI模式：隐藏映射步骤，显示定位卡步骤
+    document.getElementById('stepMapping').classList.add('hidden');
+    document.getElementById('arrowAfterMapping').classList.add('hidden');
+    document.getElementById('stepSoulCard').classList.remove('hidden');
+    document.getElementById('arrowAfterSoulCard').classList.remove('hidden');
+    document.getElementById('stepSoulCard').textContent = '② 剧魂定位卡';
+    document.getElementById('stepAnnotate').textContent = '③ 逐场景批注';
+    document.getElementById('stepGenerate').textContent = '④ 提示词生成';
+  } else {
+    dirBtn.style.background = '#f59e0b'; dirBtn.style.color = '#fff';
+    aiBtn.style.background = 'transparent'; aiBtn.style.color = '#888';
+    hintEl.textContent = '将导演录音转文字映射到剧本对应位置，保留导演原话';
+    notesWrap.classList.remove('hidden');
+    // 导演模式：显示映射步骤，隐藏定位卡步骤
+    document.getElementById('stepMapping').classList.remove('hidden');
+    document.getElementById('arrowAfterMapping').classList.remove('hidden');
+    document.getElementById('stepSoulCard').classList.add('hidden');
+    document.getElementById('arrowAfterSoulCard').classList.add('hidden');
+    document.getElementById('stepAnnotate').textContent = '③ 逐场景批注';
+    document.getElementById('stepGenerate').textContent = '④ 提示词生成';
+  }
+  updateStep1Button();
+}
+
+function updateStep1Button() {
+  const btn = document.getElementById('btnStep1Next');
+  const hasScript = !!agentAState.scriptText;
+  if (agentAState.analysisMode === 'director') {
+    btn.textContent = '开始映射分析';
+    const hasNotes = !!(document.getElementById('directorNotesInput').value.trim());
+    btn.disabled = !(hasScript && hasNotes);
+  } else {
+    btn.textContent = '生成剧魂定位卡';
+    btn.disabled = !hasScript;
+  }
+}
+
+// 导演讲戏文件上传
+async function handleDirectorFileUpload(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const nameEl = document.getElementById('directorFileName');
+  nameEl.textContent = `已选择：${file.name}`;
+  nameEl.classList.remove('hidden');
+
+  try {
+    const text = await file.text();
+    document.getElementById('directorNotesInput').value = text;
+    showStatus('directorNotesStatus', 'success', `已加载：${text.length} 字`);
+    updateStep1Button();
+  } catch (err) {
+    showStatus('directorNotesStatus', 'error', '读取文件失败：' + err.message);
+  }
+  input.value = '';
+}
+
+// 步骤1 下一步按钮
+function handleStep1Next() {
+  if (agentAState.analysisMode === 'director') {
+    startDirectorAnnotate();
+  } else {
+    generateSoulCard();
+  }
+}
+
+// 步骤2：生成剧魂定位卡（AI模式）
+async function generateSoulCard() {
+  const config = getConfig();
+  if (!config.apiKey) return showStatus('agentAUploadStatus', 'error', '请先填写 API Key');
+  if (!agentAState.scriptText) return showStatus('agentAUploadStatus', 'error', '请先上传剧本');
+
+  const btn = document.getElementById('btnStep1Next');
+  btn.disabled = true;
+  btn.textContent = '生成中...';
+
+  const cardSection = document.getElementById('agentA_soulCard');
+  cardSection.classList.remove('hidden');
+  showStatus('soulCardStatus', 'loading', '正在调用 AI 分析剧本，生成剧魂定位卡（可能需要1-2分钟）...');
+
+  setStepState('stepUpload', 'completed');
+  setStepState('stepSoulCard', 'active');
+
+  try {
+    const res = await fetch('/api/agent-a/soul-card', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scriptText: agentAState.scriptText, config })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    agentAState.soulCard = data.soulCard;
+    const contentEl = document.getElementById('soulCardContent');
+    contentEl.textContent = data.soulCard;
+    contentEl.style.display = 'block';
+    document.getElementById('soulCardEditHint').classList.remove('hidden');
+    document.getElementById('soulCardActions').classList.remove('hidden');
+    showStatus('soulCardStatus', 'success', '剧魂定位卡生成完成，请审阅后确认');
+  } catch (err) {
+    showStatus('soulCardStatus', 'error', err.message);
+  }
+  btn.disabled = false;
+  btn.textContent = '生成剧魂定位卡';
+}
+
+// 导演讲戏模式：第一步 → 映射切分
+async function startDirectorAnnotate() {
+  const config = getConfig();
+  if (!config.apiKey) return showStatus('agentAUploadStatus', 'error', '请先填写 API Key');
+  if (!agentAState.scriptText) return showStatus('agentAUploadStatus', 'error', '请先上传剧本');
+
+  const notesText = document.getElementById('directorNotesInput').value.trim();
+  if (!notesText) return showStatus('directorNotesStatus', 'error', '请输入导演讲戏文本');
+  agentAState.directorNotes = notesText;
+
+  const btn = document.getElementById('btnStep1Next');
+  btn.disabled = true;
+  btn.textContent = '映射分析中...';
+
+  setStepState('stepUpload', 'completed');
+  setStepState('stepMapping', 'active');
+
+  const mappingSection = document.getElementById('agentA_mapping');
+  mappingSection.classList.remove('hidden');
+  showStatus('mappingStatus', 'loading', '正在分析导演讲戏文本，切分并映射到剧本场景（可能需要1-2分钟）...');
+
+  try {
+    const res = await fetch('/api/agent-a/director-map', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        scriptText: agentAState.scriptText,
+        directorNotes: notesText,
+        config
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    agentAState.mappedSegments = data.segments;
+    agentAState.sceneOptions = data.sceneOptions;
+    renderMappingPreview(data.segments, data.summary, data.sceneOptions);
+    showStatus('mappingStatus', 'success', '映射完成，请检查每段讲戏对应的场景是否正确，可用下拉框修改');
+    document.getElementById('mappingActions').classList.remove('hidden');
+  } catch (err) {
+    showStatus('mappingStatus', 'error', '映射失败：' + err.message);
+  }
+  btn.disabled = false;
+  btn.textContent = '开始映射分析';
+}
+
+// 渲染映射预览
+function renderMappingPreview(segments, summary, sceneOptions) {
+  // 统计摘要
+  const sumEl = document.getElementById('mappingSummary');
+  if (summary) {
+    let sumHtml = '<div class="check-bar">';
+    sumHtml += '<span class="check-item check-ok">共 ' + (summary.total || segments.length) + ' 段</span>';
+    if (summary.mapped) sumHtml += '<span class="check-item check-ok">✓ 已映射 ' + summary.mapped + '</span>';
+    if (summary.uncertain) sumHtml += '<span class="check-item check-warn">⚠ 待确认 ' + summary.uncertain + '</span>';
+    if (summary.unmapped) sumHtml += '<span class="check-item check-fail">✗ 未映射 ' + summary.unmapped + '</span>';
+    if (summary.global) sumHtml += '<span class="check-item" style="background:rgba(245,158,11,0.12);color:#fcd34d;">🌐 全局 ' + summary.global + '</span>';
+    sumHtml += '</div>';
+    sumEl.innerHTML = sumHtml;
+    sumEl.classList.remove('hidden');
+  }
+
+  // 场景选项HTML
+  let optionsHtml = '<option value="">-- 未映射 --</option>';
+  optionsHtml += '<option value="global">🌐 全局（所有场景）</option>';
+  for (const s of sceneOptions) {
+    optionsHtml += '<option value="' + escapeHtml(s.id) + '">场景 ' + escapeHtml(s.id) + ' ' + escapeHtml((s.header || '').slice(0, 20)) + '</option>';
+  }
+
+  // 渲染每段
+  const listEl = document.getElementById('mappingList');
+  let html = '';
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const conf = seg.confidence || 'medium';
+    const cardClass = !seg.sceneId || seg.sceneId === 'null' ? 'no-match' : conf === 'low' ? 'low-conf' : '';
+    const typeClass = 'map-type-' + (seg.type || 'feel');
+    const typeLabel = { feel: '场景感受', intent: '镜头意图', inner: '人物内心', forbid: '禁止项', global: '全局' }[seg.type] || seg.type;
+    const confLabel = { high: '高', medium: '中', low: '低' }[conf] || conf;
+
+    html += '<div class="map-card ' + cardClass + '" data-seg-index="' + i + '">';
+    html += '<div class="map-header">';
+    html += '<div style="display:flex;gap:4px;align-items:center;">';
+    html += '<span style="font-size:11px;color:#666;">#' + (seg.id || i + 1) + '</span>';
+    html += '<span class="map-type ' + typeClass + '">' + typeLabel + '</span>';
+    html += '<span class="map-conf map-conf-' + conf + '">置信度：' + confLabel + '</span>';
+    html += '</div>';
+    html += '<select class="map-scene-select" data-seg-index="' + i + '" onchange="updateSegmentMapping(this)">';
+
+    // 设置选中项
+    const curScene = seg.sceneId === 'null' ? '' : (seg.sceneId || '');
+    const tempOptions = optionsHtml.replace(
+      'value="' + escapeHtml(curScene) + '"',
+      'value="' + escapeHtml(curScene) + '" selected'
+    );
+    html += tempOptions;
+    html += '</select>';
+    html += '</div>';
+
+    // 原文
+    const displayText = (seg.text || '').length > 150 ? seg.text.slice(0, 150) + '...' : seg.text;
+    html += '<div class="map-text">' + escapeHtml(displayText || '') + '</div>';
+
+    // 匹配理由
+    if (seg.reason) {
+      html += '<div class="map-reason">📎 ' + escapeHtml(seg.reason) + '</div>';
+    }
+
+    // 候选场景（如果有）
+    if (seg.candidates && seg.candidates.length > 0 && conf !== 'high') {
+      html += '<div class="map-reason" style="color:#fcd34d;">💡 可能的场景：' + seg.candidates.join('、') + '</div>';
+    }
+
+    html += '</div>';
+  }
+  listEl.innerHTML = html;
+}
+
+// 用户修改映射关系
+function updateSegmentMapping(selectEl) {
+  const idx = parseInt(selectEl.dataset.segIndex);
+  if (agentAState.mappedSegments && agentAState.mappedSegments[idx]) {
+    const newSceneId = selectEl.value || null;
+    agentAState.mappedSegments[idx].sceneId = newSceneId;
+    // 如果改成global，类型也改成global
+    if (newSceneId === 'global') {
+      agentAState.mappedSegments[idx].type = 'global';
+    }
+    // 更新卡片样式
+    const card = selectEl.closest('.map-card');
+    card.classList.remove('no-match', 'low-conf');
+    if (!newSceneId) card.classList.add('no-match');
+  }
+}
+
+// 确认映射 → 开始批注
+async function confirmMapping() {
+  if (!agentAState.mappedSegments?.length) return;
+  const config = getConfig();
+
+  // 过滤掉完全没映射的（sceneId为null的跳过）
+  const validSegments = agentAState.mappedSegments.filter(s => s.sceneId && s.sceneId !== 'null');
+  if (validSegments.length === 0) {
+    return showStatus('mappingStatus', 'error', '没有任何段落映射到场景，请至少映射一段');
+  }
+
+  setStepState('stepMapping', 'completed');
+  setStepState('stepAnnotate', 'active');
+
+  const annotateSection = document.getElementById('agentA_annotate');
+  annotateSection.classList.remove('hidden');
+  showStatus('annotateStatus', 'loading', '正在提交导演讲戏批注任务（' + validSegments.length + '段已映射）...');
+
+  try {
+    const res = await fetch('/api/agent-a/annotate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        scriptText: agentAState.scriptText,
+        config,
+        mode: 'director',
+        mappedSegments: validSegments
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    agentAState.annotateJobId = data.jobId;
+    pollAnnotateProgress(data.jobId);
+  } catch (err) {
+    showStatus('annotateStatus', 'error', err.message);
+  }
+}
+
+// 重新映射
+function redoMapping() {
+  document.getElementById('mappingList').innerHTML = '';
+  document.getElementById('mappingSummary').classList.add('hidden');
+  document.getElementById('mappingActions').classList.add('hidden');
+  agentAState.mappedSegments = null;
+  startDirectorAnnotate();
+}
+
+function regenerateSoulCard() {
+  document.getElementById('soulCardContent').style.display = 'none';
+  document.getElementById('soulCardActions').classList.add('hidden');
+  document.getElementById('soulCardEditHint').classList.add('hidden');
+  generateSoulCard();
+}
+
+// 步骤3：确认定位卡 → 开始批注
+async function confirmSoulCard() {
+  // 获取可能被编辑过的内容
+  agentAState.soulCard = document.getElementById('soulCardContent').textContent;
+  const config = getConfig();
+
+  setStepState('stepSoulCard', 'completed');
+  setStepState('stepAnnotate', 'active');
+
+  const annotateSection = document.getElementById('agentA_annotate');
+  annotateSection.classList.remove('hidden');
+  showStatus('annotateStatus', 'loading', '正在提交批注任务...');
+
+  try {
+    const res = await fetch('/api/agent-a/annotate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        scriptText: agentAState.scriptText,
+        soulCard: agentAState.soulCard,
+        config
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    agentAState.annotateJobId = data.jobId;
+    pollAnnotateProgress(data.jobId);
+  } catch (err) {
+    showStatus('annotateStatus', 'error', err.message);
+  }
+}
+
+function pollAnnotateProgress(jobId) {
+  const es = new EventSource(`/api/agent-a/progress/${jobId}`);
+  es.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    if (data.error) {
+      showStatus('annotateStatus', 'error', data.error);
+      es.close();
+      return;
+    }
+    if (data.status === 'running') {
+      // 逐场景进度展示
+      let html = '';
+      if (data.total) {
+        html += `<div class="progress-bar"><div class="progress-fill" style="width:${Math.round((data.completed / data.total) * 100)}%"></div></div>`;
+        html += `<div class="progress-text">${data.completed} / ${data.total} 场景</div>`;
+      }
+      for (const p of (data.progress || [])) {
+        const dotClass = p.status === 'done' ? 'dot-done'
+          : p.status === 'error' ? 'dot-error'
+          : p.status === 'processing' ? 'dot-processing' : 'dot-pending';
+        html += `<div class="progress-item"><span class="dot ${dotClass}"></span>${escapeHtml(p.sceneId)} ${escapeHtml(p.message)}</div>`;
+      }
+      document.getElementById('annotateStatus').innerHTML = html || '<div class="status status-loading">批注进行中...</div>';
+    } else if (data.status === 'done') {
+      showStatus('annotateStatus', 'success', '批注完成！');
+      es.close();
+      fetchAnnotateResult(jobId);
+    } else if (data.status === 'error') {
+      showStatus('annotateStatus', 'error', '批注失败');
+      es.close();
+    }
+  };
+  es.onerror = () => {
+    es.close();
+    setTimeout(() => fetchAnnotateResult(jobId), 1000);
+  };
+}
+
+async function fetchAnnotateResult(jobId) {
+  try {
+    const res = await fetch(`/api/agent-a/results/${jobId}`);
+    const data = await res.json();
+    if (data.status === 'done' && data.result) {
+      agentAState.annotatedScript = data.result;
+
+      // 构建验算状态栏 + 批注预览
+      let html = '';
+      if (data.validations?.length) {
+        html += '<div style="margin-bottom:10px;">';
+        for (const v of data.validations) {
+          if (!v) continue;
+          const s = v.stats;
+          html += `<div class="check-bar" style="margin-bottom:4px;">`;
+          html += `<span style="font-size:12px;color:#ccc;min-width:55px;">场景${escapeHtml(v.sceneId)}</span>`;
+          html += `<span class="check-item ${s.dlHit===s.dlTotal?'check-ok':'check-fail'}">${s.dlHit===s.dlTotal?'✓':'✗'} 台词${s.dlHit}/${s.dlTotal}</span>`;
+          html += `<span class="check-item ${s.actHit===s.actTotal?'check-ok':'check-fail'}">${s.actHit===s.actTotal?'✓':'✗'} 动作${s.actHit}/${s.actTotal}</span>`;
+          html += `<span class="check-item ${s.fakeCount===0?'check-ok':'check-fail'}">${s.fakeCount===0?'✓':'✗'} ${s.fakeCount===0?'无自创':'自创'+s.fakeCount+'条'}</span>`;
+          html += `<span class="check-item ${s.hasFeel?'check-ok':'check-fail'}">${s.hasFeel?'✓':'✗'} 场景感受</span>`;
+          html += `<span class="check-item check-ok">内心×${s.innerCount}</span>`;
+          html += `<span class="check-item check-ok">意图×${s.intentCount}</span>`;
+          if (s.forbidCount > 0) html += `<span class="check-item check-ok">禁止×${s.forbidCount}</span>`;
+          if (s.pendingCount > 0) html += `<span class="check-item check-warn">待补充×${s.pendingCount}</span>`;
+          if (s.dnCount > 0) html += `<span class="check-item check-ok">讲戏块×${s.dnCount}</span>`;
+          if (s.dnCount === 0 && s.pendingCount === 0) html += `<span class="check-item check-fail">✗ 缺少（导演讲戏：）</span>`;
+          html += `</div>`;
+        }
+        html += '</div>';
+      }
+
+      const resultEl = document.getElementById('annotateResult');
+      resultEl.innerHTML = html + '<div style="white-space:pre-wrap;word-break:break-all;">' + escapeHtml(data.result) + '</div>';
+      resultEl.classList.remove('hidden');
+      document.getElementById('annotateActions').classList.remove('hidden');
+      showStatus('annotateStatus', 'success', `批注完成（${data.result.length}字），验算通过，可预览或进入提示词生成`);
+    } else if (data.status === 'error') {
+      showStatus('annotateStatus', 'error', `批注失败：${data.error || '未知错误'}`);
+    }
+  } catch (err) {
+    showStatus('annotateStatus', 'error', `获取结果失败：${err.message}`);
+  }
+}
+
+async function downloadAnnotation() {
+  if (!agentAState.annotateJobId) return;
+  window.open(`/api/agent-a/download/${agentAState.annotateJobId}`, '_blank');
+}
+
+function copyAnnotation() {
+  if (!agentAState.annotatedScript) return;
+  navigator.clipboard.writeText(agentAState.annotatedScript).then(() => {
+    showStatus('annotateStatus', 'success', '已复制到剪贴板');
+    setTimeout(() => showStatus('annotateStatus', 'success', '批注完成，可进入提示词生成'), 1500);
+  });
+}
+
+// 步骤4：进入提示词生成
+async function proceedToGenerate() {
+  if (!agentAState.annotatedScript) return;
+
+  setStepState('stepAnnotate', 'completed');
+  setStepState('stepGenerate', 'active');
+
+  const genSection = document.getElementById('agentA_generate');
+  genSection.classList.remove('hidden');
+
+  // 解析批注剧本为场景
+  try {
+    const res = await fetch('/api/parse-text', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: agentAState.annotatedScript })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    agentAState.scenes = data.scenes;
+    renderSceneInfo('agentA_sceneInfo', data.scenes);
+  } catch (err) {
+    document.getElementById('agentA_sceneInfo').innerHTML =
+      `<div class="status status-error">${escapeHtml(err.message)}</div>
+       <p style="font-size:12px;color:#888;margin-top:8px;">提示：批注输出可能不包含标准"场景X-X"格式。您可以将批注内容复制后手动调整格式，或切换到"直接模式"上传处理后的文件。</p>`;
+  }
+
+  genSection.scrollIntoView({ behavior: 'smooth' });
+}
+
+async function startGenerateFromAgentA() {
+  if (!agentAState.scenes?.length) return;
+  const config = getConfig();
+  if (!config.apiKey) return;
+
+  const btn = document.getElementById('btnGenerateA');
+  btn.disabled = true;
+  btn.textContent = '生成中...';
+
+  const costumeCard = document.getElementById('costumeCardA').value.trim();
+  const progressEl = document.getElementById('agentA_generateProgress');
+  const resultEl = document.getElementById('agentA_generateResult');
+  progressEl.classList.remove('hidden');
+  progressEl.innerHTML = '<div class="status status-loading">正在提交生成任务...</div>';
+
+  try {
+    const res = await fetch('/api/process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scenes: agentAState.scenes, costumeCard, config })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    agentAState.generateJobId = data.jobId;
+    pollGenerateProgress(data.jobId, progressEl, resultEl, btn, 'agentA');
+  } catch (err) {
+    progressEl.innerHTML = `<div class="status status-error">${escapeHtml(err.message)}</div>`;
+    btn.disabled = false;
+    btn.textContent = '开始生成提示词';
+  }
+}
+
+// ============================================================
+// 直接模式
+// ============================================================
+
+async function handleDirectUpload(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const nameEl = document.getElementById('directFileName');
+  nameEl.textContent = `已选择：${file.name}`;
+  nameEl.classList.remove('hidden');
+
+  showStatus('directUploadStatus', 'info', '正在解析文件...');
+  const form = new FormData();
+  form.append('file', file);
+  try {
+    const res = await fetch('/api/upload', { method: 'POST', body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    directState.scenes = data.scenes;
+    showStatus('directUploadStatus', 'success', `解析成功：${data.scenes.length} 个场景`);
+
+    const scenesCard = document.getElementById('directScenes');
+    scenesCard.classList.remove('hidden');
+    renderSceneInfo('directSceneList', data.scenes);
+
+    document.getElementById('directGenerate').classList.remove('hidden');
+  } catch (err) {
+    showStatus('directUploadStatus', 'error', err.message);
+  }
+  input.value = '';
+}
+
+async function startDirectGenerate() {
+  if (!directState.scenes?.length) return;
+  const config = getConfig();
+  if (!config.apiKey) return showStatus('directUploadStatus', 'error', '请先填写 API Key');
+
+  const btn = document.getElementById('btnGenerateD');
+  btn.disabled = true;
+  btn.textContent = '生成中...';
+
+  const costumeCard = document.getElementById('costumeCardD').value.trim();
+  const progressCard = document.getElementById('directProgress');
+  progressCard.classList.remove('hidden');
+  const progressEl = document.getElementById('directProgressList');
+  progressEl.innerHTML = '<div class="status status-loading">正在提交生成任务...</div>';
+
+  try {
+    const res = await fetch('/api/process', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scenes: directState.scenes, costumeCard, config })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    directState.jobId = data.jobId;
+    pollGenerateProgress(data.jobId, progressEl,
+      document.getElementById('directResultList'), btn, 'direct');
+  } catch (err) {
+    progressEl.innerHTML = `<div class="status status-error">${escapeHtml(err.message)}</div>`;
+    btn.disabled = false;
+    btn.textContent = '开始生成提示词';
+  }
+}
+
+// ============================================================
+// 共享：生成进度轮询
+// ============================================================
+
+function pollGenerateProgress(jobId, progressEl, resultEl, btn, mode) {
+  const es = new EventSource(`/api/progress/${jobId}`);
+  es.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    if (data.error) {
+      progressEl.innerHTML = `<div class="status status-error">${escapeHtml(data.error)}</div>`;
+      es.close();
+      btn.disabled = false;
+      btn.textContent = '开始生成提示词';
+      return;
+    }
+
+    // 渲染进度
+    let html = `<div class="progress-bar"><div class="progress-fill" style="width:${Math.round((data.completed / data.total) * 100)}%"></div></div>`;
+    html += `<div class="progress-text">${data.completed} / ${data.total} 场景完成</div>`;
+    for (const p of (data.progress || [])) {
+      const dotClass = p.status === 'done' ? 'dot-done'
+        : p.status === 'error' ? 'dot-error'
+        : p.status === 'processing' ? 'dot-processing' : 'dot-pending';
+      html += `<div class="progress-item"><span class="dot ${dotClass}"></span>${escapeHtml(p.sceneId)} ${escapeHtml(p.message)}</div>`;
+    }
+    progressEl.innerHTML = html;
+
+    if (data.status === 'done') {
+      es.close();
+      btn.disabled = false;
+      btn.textContent = '开始生成提示词';
+      fetchGenerateResults(jobId, resultEl, mode);
+    }
+  };
+  es.onerror = () => {
+    es.close();
+    btn.disabled = false;
+    btn.textContent = '开始生成提示词';
+    setTimeout(() => fetchGenerateResults(jobId, resultEl, mode), 1000);
+  };
+}
+
+async function fetchGenerateResults(jobId, resultEl, mode) {
+  try {
+    const res = await fetch(`/api/results/${jobId}`);
+    const data = await res.json();
+    if (!data.results?.length) return;
+
+    if (mode === 'direct') {
+      document.getElementById('directResults').classList.remove('hidden');
+    }
+
+    const results = data.results;
+
+    let html = '<div style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;">';
+    html += `<button class="btn btn-primary btn-sm" onclick="copyAllClean()">复制全部纯提示词</button>`;
+    html += `<button class="btn btn-outline btn-sm" onclick="downloadResults('clean')">下载纯提示词版</button>`;
+    html += `<button class="btn btn-outline btn-sm" onclick="downloadResults('full')">下载完整版</button>`;
+    html += '</div>';
+
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      const typeLabel = r.sceneType === 'wuxi' ? '武戏' : r.sceneType === 'wenxi' ? '文戏' : '混合';
+      const tagClass = r.sceneType === 'wuxi' ? 'tag-wuxi' : r.sceneType === 'wenxi' ? 'tag-wenxi' : 'tag-mixed';
+      const clean = cleanPromptContent(r.content);
+      const checks = extractValidation(r.content);
+      const segments = splitSegments(clean);
+
+      html += `<details style="margin-bottom:8px;" open>`;
+      html += `<summary style="cursor:pointer;font-size:13px;padding:8px;background:#12141c;border-radius:6px;">`;
+      html += `场景 ${escapeHtml(r.sceneId)} <span class="scene-tag ${tagClass}">${typeLabel}</span> ${escapeHtml(r.sceneHeader || '')}`;
+      html += `</summary>`;
+
+      // 验算状态栏
+      if (checks.length > 0) {
+        html += '<div style="padding:4px 0;">';
+        for (const c of checks) {
+          html += '<div class="check-bar">';
+          html += `<span class="check-item ${c.calcOk ? 'check-ok' : 'check-fail'}">${c.calcOk ? '✓' : '✗'} ${escapeHtml(c.segment)}</span>`;
+          if (c.actualDur !== null) {
+            const durOk = c.actualDur <= 15.5 && c.actualDur >= 5;
+            html += `<span class="check-item ${durOk ? 'check-ok' : 'check-fail'}">${durOk ? '✓' : '⚠'} ${c.actualDur}s/${c.shotCount}镜</span>`;
+          }
+          if (c.dialogueDur) html += `<span class="check-item check-ok">✓ 台词${c.dialogueDur}s</span>`;
+          if (c.charCount) html += `<span class="check-item ${parseInt(c.charCount)<=1800 ? 'check-ok' : 'check-warn'}">${parseInt(c.charCount)<=1800?'✓':'⚠'} ${c.charCount}字</span>`;
+          if (c.connOk) html += `<span class="check-item check-ok">✓ 衔接</span>`;
+          if (c.hasSHFL) html += `<span class="check-item check-ok">✓ 声画分离</span>`;
+          html += '</div>';
+        }
+        html += '</div>';
+      }
+
+      // 逐片段展示 + 独立复制按钮
+      for (let si = 0; si < segments.length; si++) {
+        const seg = segments[si];
+        html += `<div style="border:1px solid #2a2d38;border-radius:6px;margin:6px 0;overflow:hidden;">`;
+        html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:#1a1d27;font-size:12px;">`;
+        html += `<span style="color:#93b4ff;">${escapeHtml(seg.title || '片段' + (si+1))}</span>`;
+        html += `<button class="btn btn-outline btn-sm" onclick="copySegmentText(this)" data-text="${btoa(encodeURIComponent(seg.text))}" style="padding:2px 10px;font-size:11px;">复制</button>`;
+        html += `</div>`;
+        html += `<div class="result-box" style="border:none;border-radius:0;max-height:300px;">${escapeHtml(seg.text)}</div>`;
+        html += `</div>`;
+      }
+
+      html += `</details>`;
+    }
+    resultEl.innerHTML = html;
+    resultEl.classList.remove('hidden');
+
+    window._generateResults = results;
+    if (mode === 'direct') directState.jobId = jobId;
+    else agentAState.generateJobId = jobId;
+
+  } catch (err) {
+    resultEl.innerHTML = `<div class="status status-error">获取结果失败：${escapeHtml(err.message)}</div>`;
+  }
+}
+
+// 从 analysis 块中提取验算状态 + 从实际输出中计算镜号总时长
+function extractValidation(content) {
+  const blocks = content.match(/<analysis>[\s\S]*?<\/analysis>/g) || [];
+  // 从实际输出中提取每个片段的镜号时长
+  const cleanContent = content
+    .replace(/<scene_plan>[\s\S]*?<\/scene_plan>/g, '')
+    .replace(/<analysis>[\s\S]*?<\/analysis>/g, '');
+  // 按片段分割
+  const segParts = cleanContent.split(/(?=【片段)/);
+
+  return blocks.map((block, idx) => {
+    const c = {};
+    const segM = block.match(/片段(\S+?)共(\d+)s/) || block.match(/片段(\S+?)共/);
+    c.segment = segM ? segM[1] : '';
+    c.duration = segM && segM[2] ? segM[2] : null;
+    const calcM = block.match(/验算结果[：:]\s*(\S+)/);
+    c.calcOk = calcM ? (calcM[1].startsWith('ok') || calcM[1] === '通过') : false;
+    const dlM = block.match(/本片段台词合计[：:]\s*约([\d.]+)[秒s]/);
+    c.dialogueDur = dlM ? dlM[1] : null;
+    const chM = block.match(/预估字数[：:]\s*约(\d+)字/);
+    c.charCount = chM ? chM[1] : null;
+    c.connOk = /景别\/视角差异确认.*✓/.test(block) || /景别.*视角.*不同.*✓/.test(block);
+    c.hasSHFL = /声画分离/.test(block);
+
+    // 从实际输出中计算镜号总时长
+    c.actualDur = null;
+    c.shotCount = 0;
+    // 找对应的片段内容
+    const segName = c.segment || '';
+    const matchPart = segParts.find(p => p.includes('【片段' + segName + '】'));
+    if (matchPart) {
+      const shotMatches = matchPart.match(/镜\d+\s+(\d+(?:\.\d+)?)\s*s/g) || [];
+      c.shotCount = shotMatches.length;
+      c.actualDur = shotMatches.reduce((sum, m) => {
+        return sum + parseFloat(m.match(/(\d+(?:\.\d+)?)\s*s/)[1]);
+      }, 0);
+    }
+    return c;
+  });
+}
+
+// 将场景内容按片段拆分（按【片段X-XA】标题分割，@声明属于片段的一部分）
+function splitSegments(cleanContent) {
+  // 找所有【片段...】的位置，往前回溯找到对应的@声明行作为片段起点
+  const segRegex = /【片段\S+】/g;
+  const positions = [];
+  let m;
+  while ((m = segRegex.exec(cleanContent)) !== null) {
+    // 往前找@声明行（可能在前面几行）
+    let startPos = m.index;
+    const before = cleanContent.substring(Math.max(0, m.index - 200), m.index);
+    const atMatch = before.match(/(?:^|\n)(@[^\n]+(?:\n@[^\n]+)*)\s*$/);
+    if (atMatch) {
+      startPos = m.index - atMatch[0].length;
+      if (cleanContent[startPos] === '\n') startPos++;
+    }
+    positions.push({ start: startPos, matchIndex: m.index });
+  }
+
+  if (positions.length === 0) {
+    return [{ title: '全部内容', text: cleanContent }];
+  }
+
+  const segments = [];
+  for (let i = 0; i < positions.length; i++) {
+    const start = positions[i].start;
+    const end = i < positions.length - 1 ? positions[i + 1].start : cleanContent.length;
+    const text = cleanContent.substring(start, end).trim();
+    const titleM = text.match(/【片段(\S+)】\s*([^\n]*)/);
+    segments.push({
+      title: titleM ? '片段' + titleM[1] + ' ' + titleM[2] : '片段' + (i + 1),
+      text
+    });
+  }
+  return segments;
+}
+
+// 剥离 scene_plan / analysis + 清理冗余标签 + 清理内部指令
+function cleanPromptContent(content) {
+  return content
+    .replace(/<scene_plan>[\s\S]*?<\/scene_plan>/g, '')
+    .replace(/<analysis>[\s\S]*?<\/analysis>/g, '')
+    // 清理 C 部分和 F 部分的 ⚠/⚠️ 自检提醒行（给AI看的，不是给即梦的）
+    .replace(/^（⚠️?[^）]*）\s*$/gm, '')
+    // 清理冗余标签文字
+    .replace(/^导演禁止项[^\n]*$/gm, '禁止项：')
+    .replace(/^【F】必现目标[^①\n]*$/gm, '【F】必现目标：')
+    .replace(/【接导演意图第\d+条】\s*/g, '')
+    .replace(/（←[^）]{0,50}）/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// 复制单个片段
+function copySegmentText(btn) {
+  const text = decodeURIComponent(atob(btn.dataset.text));
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = '已复制';
+    setTimeout(() => { btn.textContent = '复制'; }, 1500);
+  });
+}
+
+// 复制单个场景全部片段
+function copySceneClean(index) {
+  if (!window._generateResults?.[index]) return;
+  const clean = cleanPromptContent(window._generateResults[index].content);
+  navigator.clipboard.writeText(clean).then(() => {
+    const btn = event.target;
+    btn.textContent = '已复制';
+    setTimeout(() => { btn.textContent = '复制'; }, 1500);
+  });
+}
+
+// 复制全部场景的纯提示词
+function copyAllClean() {
+  if (!window._generateResults) return;
+  let all = '';
+  for (const r of window._generateResults) {
+    const typeLabel = r.sceneType === 'wuxi' ? '[武戏]' : r.sceneType === 'wenxi' ? '[文戏]' : '[混合]';
+    all += `${'═'.repeat(50)}\n场景 ${r.sceneId}  ${r.sceneHeader}  ${typeLabel}\n${'═'.repeat(50)}\n\n`;
+    all += cleanPromptContent(r.content) + '\n\n';
+  }
+  navigator.clipboard.writeText(all).then(() => {
+    const btn = event.target;
+    const orig = btn.textContent;
+    btn.textContent = '已复制全部';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  });
+}
+
+function downloadResults(type) {
+  const jobId = currentMode === 'direct' ? directState.jobId : agentAState.generateJobId;
+  if (!jobId) return;
+  const endpoint = type === 'clean' ? `/api/download-prompts/${jobId}` : `/api/download/${jobId}`;
+  window.open(endpoint, '_blank');
+}
+
+// ============================================================
+// 共享：场景列表渲染
+// ============================================================
+
+function renderSceneInfo(containerId, scenes) {
+  let html = '';
+  for (const s of scenes) {
+    const typeLabel = s.sceneType === 'wuxi' ? '武戏' : s.sceneType === 'wenxi' ? '文戏' : '混合';
+    const tagClass = s.sceneType === 'wuxi' ? 'tag-wuxi' : s.sceneType === 'wenxi' ? 'tag-wenxi' : 'tag-mixed';
+    html += `<div class="scene-item">`;
+    html += `<span>场景 ${escapeHtml(s.id)}　${escapeHtml(s.header || '')}</span>`;
+    html += `<span class="scene-tag ${tagClass}">${typeLabel}</span>`;
+    html += `</div>`;
+  }
+  document.getElementById(containerId).innerHTML = html;
+}
+
+// ============================================================
+// 初始化
+// ============================================================
+onApiTypeChange();
+// 导演讲戏文本输入监听
+document.getElementById('directorNotesInput').addEventListener('input', updateStep1Button);
+</script>
+</body>
+</html>
