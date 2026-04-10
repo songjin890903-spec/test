@@ -510,9 +510,10 @@ function buildPlanPrompt(scene, costumeCard, dialogues) {
   p += `   · 导演描述了一段连贯的走位调度（如"范思瑶边走边说→赵一铭上前两步→范思瑶挽手摸胸口→说台词"），整段调度放在同一个片段，不拆开\n`;
   p += `   · 导演指定了转场设计（如"眼睛到眼睛转场"），转场必须在最后一个片段的最后一镜完成\n`;
   p += `9. 动作线规划（文戏/混合场景）：\n`;
-  p += `   · 动作线分两层：第一层"道具任务型"（吃饭/擦刀）只能来自剧本或导演，不编；第二层"情绪驱动肢体"（往前走一步/转身/撑桌子/后退）是人说话时自然的身体行为，必须写\n`;
-  p += `   · 有第一层时：action_threads写角色的物理任务，情绪拐点镜号的task标注任务变化\n`;
-  p += `   · 无第一层时：action_threads写"无道具任务·写情绪肢体"，规划中仍须包含说话人肢体动作和听者身体反应的镜号\n`;
+  p += `   · 动作线分两层：第一层"道具任务型"（吃饭/擦刀）来源是 AGENT_A 批注的【动作线设计】块或剧本原文，不能自行编造；第二层"情绪驱动肢体"（往前走一步/转身/撑桌子/后退）是人说话时自然的身体行为，必须写\n`;
+  p += `   · 优先从 AGENT_A 批注的【动作线设计】块里读取每个角色的物理任务，没有【动作线设计】或写了"无道具任务"时，第一层留空，全部依赖第二层撑场面\n`;
+  p += `   · 有第一层时：action_threads 写角色的物理任务，情绪拐点镜号的 task 标注任务变化\n`;
+  p += `   · 无第一层时：action_threads 写"无道具任务·写情绪肢体"，规划中仍须包含说话人肢体动作和听者身体反应的镜号\n`;
   p += `   · 说话人不能连续占两个以上镜号——说完就切到听者身体反应\n`;
 
   // 武戏宏观弧线规划
@@ -768,7 +769,7 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
   p += `3c. 武文过渡镜号：武→文（task含"余震/定格"）用【武戏专项·五段式余震阶段】写法，让冲击的余波在画面里停住再接台词；文→武（task含"蓄力/临界"）用【武戏专项·五段式蓄势阶段】写法，身体细节蓄力再接动作爆发。\n`;
   p += `3d. 反应镜号（task含"反应"）：纯画面·写听者的表情变化、身体反应、沉默。不写台词。让对话有呼吸感，不要从一句台词直接跳到下一句。\n`;
   p += `3e. 武戏镜号：叙事·镜头·（物理交互）三层缝合推进，（）内只写材质世界的物理反应——力从哪来·打到什么上·材质怎么形变·形变怎么扩散，不写情绪不写心理。\n`;
-  p += `3f. ⚠️ 动作线两层：第一层"道具任务"（吃饭/擦刀）只能来自剧本或导演；第二层"情绪驱动肢体"（往前走一步/转身/撑桌子/后退）是说话/听话时身体自然会做的事，必须写。没有第一层时第二层就是全部身体表演。\n`;
+  p += `3f. ⚠️ 动作线两层：第一层"道具任务"（吃饭/擦刀）来源是 AGENT_A 批注的【动作线设计】块或剧本原文；第二层"情绪驱动肢体"（往前走一步/转身/撑桌子/后退）是说话/听话时身体自然会做的事，必须写。批注的【动作线设计】里写"无道具任务"或没有该批注时，第一层不编，全靠第二层撑场面。\n`;
   p += `3g. ⚠️ 听者身体反应：说话人说完立刻切走拍听者。听者是身体先动不是脸先动——上半身往后靠/手悬空/肩膀缩/笔掉了。说话人不能连续占两个以上镜号。\n`;
   p += `4. C部分第一段第一句锚定入场景别和视角。\n`;
   p += `5. 最后一段最后一句锚定出场景别和视角，并标注接棒物。\n`;
@@ -1112,7 +1113,7 @@ async function processSceneSingleShot(scene, costumeCard, config, job, sceneInde
   userMsg += `14. A部分格式统一：所有片段的A部分用相同格式，不加方括号，参数用·分隔。\n`;
   userMsg += `15. 导演标注了⚠️/一定要/必须的内容，C部分叙事中必须明确体现（如"重音"→写"刻意加重咬字"）。\n`;
   userMsg += `16. 导演描述的连贯走位调度放在同一个片段，不拆开。\n`;
-  userMsg += `17. ⚠️ 动作线两层：第一层"道具任务"（吃饭/擦刀）只能来自剧本或导演，不编；第二层"情绪驱动肢体"（往前走一步/转身/撑桌子）是人说话时身体自然会做的事，必须写。有第一层时B部分写明物理任务。\n`;
+  userMsg += `17. ⚠️ 动作线两层：第一层"道具任务"（吃饭/擦刀）来源是 AGENT_A 批注的【动作线设计】块或剧本原文，不编；第二层"情绪驱动肢体"（往前走一步/转身/撑桌子）是人说话时身体自然会做的事，必须写。优先从【动作线设计】批注块提取每个角色的物理任务，没有该批注或写"无"时第一层留空。\n`;
   userMsg += `18. ⚠️ 听者身体反应：说话人说完立刻切走拍听者身体反应（上半身后靠/手停了/肩缩了），不是只拍脸。说话人不能连续占两个以上镜号。\n`;
 
   // 检测转场指令
@@ -1393,7 +1394,12 @@ function buildAnnotationPlanPrompt(scene, allScenes, soulCard, prevFeel) {
   p += '3. 关键负面节点（背叛/死亡/羞辱/爆发）必须标注 forbid\n';
   p += '4. 开场如果缺少"暖"的建立，标注 gap + cold_open\n';
   p += '5. 情绪转折点必须标注 stable（稳帧点）\n';
-  p += '6. dialogue_count 和 action_count 必须与以下程序计数一致\n\n';
+  p += '6. dialogue_count 和 action_count 必须与以下程序计数一致\n';
+  p += '7. ⚠️ action_thread_design 字段必填——为本场景每个有名字的角色规划"道具任务型动作线"：\n';
+  p += '   优先级①：剧本原文写了角色在做什么物理任务（"▲他坐桌边吃面"）→ 直接提取\n';
+  p += '   优先级②：剧本未写但场景上下文强暗示（吃饭场景/兵器房/办公室等）→ 推断合理任务\n';
+  p += '   优先级③：剧本完全没暗示（如临时指挥部里的对话）→ 写"无道具任务·依赖第二层情绪驱动肢体"\n';
+  p += '   ⚠️ 第三种情况不要硬编一个任务出来，写"无道具任务"即可，Agent C 会用第二层撑场面\n\n';
   p += '程序计数（铁律，不可改）：\n';
   p += '  台词行：' + origDL.length + ' 条\n';
   p += '  动作行：' + origAct.length + ' 条\n\n';
@@ -1406,6 +1412,8 @@ function buildAnnotationPlanPrompt(scene, allScenes, soulCard, prevFeel) {
   p += 'JSON 格式：\n';
   p += '{"scene_id":"' + scene.id + '","scene_feel":"一句话","emotion_flow":"A→B→C",';
   p += '"structure_node":"节点类型","cold_open":false,';
+  p += '"action_thread_design":[{"character":"角色名","task":"物理任务或无道具任务","source":"剧本原文/上下文推断/无"}],';
+  p += '"action_thread_turning_point":"情绪拐点处的动作线变化·一句话",';
   p += '"lines":[{"num":1,"type":"info/action/dialogue","text":"原文前20字","needs":["intent","inner"]}],';
   p += '"dialogue_count":' + origDL.length + ',"action_count":' + origAct.length + '}\n';
   return p;
@@ -1425,6 +1433,9 @@ function validateAnnotationPlan(plan, originalContent) {
   if (!plan) return ['规划格式错误，无法解析JSON'];
   if (!plan.scene_feel) errors.push('缺少 scene_feel');
   if (!plan.emotion_flow) errors.push('缺少 emotion_flow');
+  if (!plan.action_thread_design || !Array.isArray(plan.action_thread_design) || plan.action_thread_design.length === 0) {
+    errors.push('缺少 action_thread_design（场景级强制·每个有名字的角色一条·没有道具任务时写"无道具任务"）');
+  }
 
   const origDL = extractRawDialogues(originalContent);
   const origAct = originalContent.match(/^▲.+$/gm) || [];
@@ -1459,6 +1470,15 @@ function buildAnnotationExecutePrompt(scene, plan, allScenes, soulCard, prevFeel
   msg += '情绪走向：' + (plan.emotion_flow || '') + '\n';
   msg += '结构节点：' + (plan.structure_node || '') + '\n';
   if (plan.cold_open) msg += 'Cold Open：需要（必须补）\n';
+  if (plan.action_thread_design && plan.action_thread_design.length > 0) {
+    msg += '动作线设计（场景级强制·必须写入场景标题行的批注块）：\n';
+    for (const a of plan.action_thread_design) {
+      msg += '  ' + (a.character || '?') + '：' + (a.task || '?') + '（来源：' + (a.source || '?') + '）\n';
+    }
+    if (plan.action_thread_turning_point) {
+      msg += '  情绪拐点处的动作线变化：' + plan.action_thread_turning_point + '\n';
+    }
+  }
   msg += '逐行批注任务：\n';
   for (const l of (plan.lines || [])) {
     msg += '  行' + l.num + ' [' + l.type + '] ' + (l.text || '').slice(0, 25) + ' → ' + (l.needs && l.needs.length ? l.needs.join('+') : 'none') + '\n';
@@ -1479,6 +1499,7 @@ function validateAnnotation(originalContent, annotatedContent) {
   const errors = [];
   if (!(annotatedContent.match(/（导演讲戏：/g) || []).length) errors.push('缺少（导演讲戏：）批注块');
   if (!annotatedContent.includes('【场景感受】')) errors.push('缺少【场景感受】');
+  if (!annotatedContent.includes('【动作线设计】')) errors.push('缺少【动作线设计】（场景级强制批注·每个角色一条物理任务或"无道具任务"）');
 
   // （导演讲戏：）括号闭合检查
   let openCount = 0;
