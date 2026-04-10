@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
 const upload = multer({ dest: 'uploads/', limits: { fileSize: 50 * 1024 * 1024 } });
 app.use(express.json({ limit: '20mb' }));
@@ -16,7 +16,7 @@ const jobs = new Map();
 // 场景类型对应的镜头数规则（集中定义，validatePlan 只接收 limits 对象）
 const SCENE_RULES = {
   wuxi:  { minShots: 3, maxShots: 6 },   // 武戏：少镜大冲击，每镜2-4秒
-  wenxi: { minShots: 6, maxShots: 8 },    // 文戏：多镜快节奏，每镜2秒
+  wenxi: { minShots: 5, maxShots: 8 },   // 文戏：5-8镜，每镜2秒
   mixed: { minShots: 5, maxShots: 8 },    // 混合：居中
 };
 
@@ -487,7 +487,7 @@ function buildPlanPrompt(scene, costumeCard, dialogues) {
   if (hasDirectorShots) {
     p += `2. 导演讲戏模式：每片段镜头数5-10个，目标每镜2秒左右（1.5-2.5秒），最长不超过3秒。\n`;
   } else {
-    p += `2. 文戏/混合场景每片段镜头数6-8个，每镜目标2秒（1.5-2.5秒），最长不超3秒；武戏每片段3-6个，每镜2-4秒，冲击感优先。\n`;
+    p += `2. 文戏/混合场景每片段镜头数5-8个，每镜目标2秒（1.5-2.5秒），最长不超3秒；武戏每片段3-6个，每镜2-4秒，冲击感优先。\n`;
   }
   p += `3. 台词镜号规则（两层）：\n`;
   p += `   · ≤3秒台词：一个镜号拍完，不用切。\n`;
@@ -509,6 +509,27 @@ function buildPlanPrompt(scene, costumeCard, dialogues) {
   p += `8. 连续调度不拆片段：\n`;
   p += `   · 导演描述了一段连贯的走位调度（如"范思瑶边走边说→赵一铭上前两步→范思瑶挽手摸胸口→说台词"），整段调度放在同一个片段，不拆开\n`;
   p += `   · 导演指定了转场设计（如"眼睛到眼睛转场"），转场必须在最后一个片段的最后一镜完成\n`;
+  p += `9. 动作线规划（文戏/混合场景）：\n`;
+  p += `   · 动作线分两层：第一层"道具任务型"（吃饭/擦刀）只能来自剧本或导演，不编；第二层"情绪驱动肢体"（往前走一步/转身/撑桌子/后退）是人说话时自然的身体行为，必须写\n`;
+  p += `   · 有第一层时：action_threads写角色的物理任务，情绪拐点镜号的task标注任务变化\n`;
+  p += `   · 无第一层时：action_threads写"无道具任务·写情绪肢体"，规划中仍须包含说话人肢体动作和听者身体反应的镜号\n`;
+  p += `   · 说话人不能连续占两个以上镜号——说完就切到听者身体反应\n`;
+
+  // 武戏宏观弧线规划
+  if (scene.sceneType === 'wuxi') {
+    p += `\n⛔ 武戏整场弧线规划（强制）：\n`;
+    p += `一场完整武戏拆成多个15秒片段时，每个片段在整场弧线上扮演不同角色，强度不同：\n`;
+    p += `  · 开端·格局建立（强度：低）→ 交代谁和谁打、空间格局，五段式用蓄势+启动\n`;
+    p += `  · 第一回合·一方压制（强度：中）→ A方攻势占优，B方被动对抗，五段式用启动+爆发\n`;
+    p += `  · 战斗间隙·蓄力（强度：骤降）→ 情绪梳理、发现破绽、蓄力，五段式用余震→蓄势\n`;
+    p += `  · 第二回合·反击（强度：高）→ B方接招反击，势均力敌或逆转，五段式用蓄势→爆发\n`;
+    p += `  · 终极回合·全力释放（强度：最高）→ 双方底牌释放，最高强度，五段式用爆发+收尾+余震\n`;
+    p += `  · 余震落幕（强度：骤降）→ 见证结果，身体回响\n`;
+    p += `强度曲线：低→中→骤降→高→最高→落，不是直线冲上去的。\n`;
+    p += `⚠️ 每个片段必须填arc_position和intensity字段，标注该片段在弧线上的位置和强度。\n`;
+    p += `⚠️ 上一个片段的余震就是下一个片段的蓄势——片段之间情绪不能断线。\n`;
+    p += `⚠️ 没有"战斗间隙·蓄力"的武戏就没有层次——至少在一个片段的开头或末尾安排喘息段。\n\n`;
+  }
 
   // 导演讲戏模式：镜头清单约束
   if (hasDirectorShots) {
@@ -548,17 +569,31 @@ function buildPlanPrompt(scene, costumeCard, dialogues) {
   }
 
   p += `请严格按以下JSON格式输出，不要任何其他文字或代码块标记：\n`;
-  p += `{"segments":[{"id":"${scene.id}A","title":"片段标题","duration":15,"shots":[\n`;
-  p += `  {"num":1,"duration":2,"focal":"85mm","task":"台词起始：角色开口说话","dialogue":"台词原文放这里，无台词留空字符串"},\n`;
-  p += `  {"num":2,"duration":2,"focal":"50mm","task":"反应：听者表情变化","dialogue":""},\n`;
-  p += `  {"num":3,"duration":2,"focal":"85mm","task":"切镜：换角度继续台词","dialogue":""},\n`;
-  p += `  {"num":4,"duration":2,"focal":"35mm","task":"声画分离：XX的OS/台词继续，画面切听者反应","dialogue":""},\n`;
-  p += `  {"num":5,"duration":2,"focal":"85mm","task":"动作：角色的关键动作","dialogue":""},\n`;
-  p += `  {"num":6,"duration":2.5,"focal":"50mm","task":"反应：另一角色反应","dialogue":""},\n`;
-  p += `  {"num":7,"duration":2.5,"focal":"35mm","task":"环境/全景收尾","dialogue":""}\n`;
+  p += `{"segments":[{"id":"${scene.id}A","title":"片段标题","duration":15,`;
+  p += `"action_threads":{"角色A":"正在做的物理任务","角色B":"正在做的物理任务"},`;
+  if (scene.sceneType === 'wuxi') {
+    p += `"arc_position":"弧线位置（如：开端·格局建立 / 第一回合·压制 / 战斗间隙·蓄力 / 第二回合·反击 / 终极回合·全力释放 / 余震落幕）","intensity":"低/中/高/最高",`;
+  }
+  p += `"shots":[\n`;
+  p += `  {"num":1,"duration":2,"shot_type":"[中景 (Medium Shot)]","task":"台词起始：角色开口说话","dialogue":"台词原文放这里，无台词留空字符串"`;
+  if (scene.sceneType === 'wuxi' || scene.sceneType === 'mixed') {
+    p += `,"five_stage":"蓄势/启动/爆发/收尾/余震（武戏镜号必填，文戏留空）"`;
+  }
+  p += `},\n`;
+  p += `  {"num":2,"duration":2,"shot_type":"[近景 (Close-up)]","task":"反应：听者表情变化","dialogue":""},\n`;
+  p += `  {"num":3,"duration":2,"shot_type":"[中景 (Medium Shot)]","task":"切镜：换角度继续台词","dialogue":""},\n`;
+  p += `  {"num":4,"duration":2,"shot_type":"[全景 (Full Shot)]","task":"声画分离：XX的OS/台词继续，画面切听者反应","dialogue":""},\n`;
+  p += `  {"num":5,"duration":2,"shot_type":"[大特写 (Extreme Close-up)]","task":"动作：角色的关键动作","dialogue":""},\n`;
+  p += `  {"num":6,"duration":2.5,"shot_type":"[近景 (Close-up)]","task":"反应：另一角色反应","dialogue":""},\n`;
+  p += `  {"num":7,"duration":2.5,"shot_type":"[全景 (Full Shot)]","task":"环境/全景收尾","dialogue":""}\n`;
   p += `],"tailFrame":"出场景别和视角"}]}\n`;
   p += `⚠️ 每镜目标时长2秒左右（1.5-2.5秒），最长不超过3秒。15秒÷2秒≈7个镜号，不要做成4-5个3秒大镜。\n`;
-  p += `⚠️ >3秒台词必须拆成多个镜号（起始+切镜/声画分离），禁止把长台词塞进单个镜号。\n\n`;
+  p += `⚠️ >3秒台词必须拆成多个镜号（起始+切镜/声画分离），禁止把长台词塞进单个镜号。\n`;
+  if (scene.sceneType === 'wuxi') {
+    p += `⚠️ 武戏shot_type景别选择必须灵活——禁止每个片段都用相同的景别序列，参考wuxi.txt基础循环单元的景别组合变化技巧。\n`;
+    p += `⚠️ 武戏每个镜号必须填five_stage字段（蓄势/启动/爆发/收尾/余震），标注当前镜号属于五段式的哪个阶段。\n`;
+  }
+  p += `\n`;
 
   p += `【场景信息】\n`;
   p += `场景编号：${scene.id}\n`;
@@ -726,14 +761,17 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
   }
 
   p += `⛔ 本次只写这一个片段，严格按以下镜号规划施工：\n`;
-  p += `1. C部分镜号数量、时长、焦段必须与规划完全一致，不得增删。\n`;
+  p += `1. C部分镜号数量、时长必须与规划完全一致，不得增删。每个段落以规划指定的 [景别 (English)] 开头，后接复合运镜指令。\n`;
   p += `2. 含台词的镜号必须在叙事正文里写出台词原文（动作状态+冒号+引号）。\n`;
   p += `3. OS独白必须以"角色OS：「引号原文」"格式写进对应镜号叙事正文。\n`;
   p += `3b. 声画分离镜号（task含"声画分离"）：写纯画面叙事，开头注明"【声画分离】XX的OS/台词继续"，不重复写台词原文。画面按【文戏专项规则】规则十-补的三层优先级选择（①听者反应 ②说话者细节 ③空景环境）。\n`;
-  p += `3c. 武文过渡镜号：武→文（task含"余震/定格"）用【武戏专项·余震落幕组合】写法，让冲击的余波在画面里停住再接台词；文→武（task含"蓄力/临界"）用【武戏专项·蓄力爆发组合】的镜1-2写法，身体细节蓄力再接动作爆发。\n`;
+  p += `3c. 武文过渡镜号：武→文（task含"余震/定格"）用【武戏专项·五段式余震阶段】写法，让冲击的余波在画面里停住再接台词；文→武（task含"蓄力/临界"）用【武戏专项·五段式蓄势阶段】写法，身体细节蓄力再接动作爆发。\n`;
   p += `3d. 反应镜号（task含"反应"）：纯画面·写听者的表情变化、身体反应、沉默。不写台词。让对话有呼吸感，不要从一句台词直接跳到下一句。\n`;
-  p += `4. C部分第一镜第一句锚定入场景别和视角。\n`;
-  p += `5. 最后一镜最后一句锚定出场景别和视角，并标注接棒物。\n`;
+  p += `3e. 武戏镜号：叙事·镜头·（物理交互）三层缝合推进，（）内只写材质世界的物理反应——力从哪来·打到什么上·材质怎么形变·形变怎么扩散，不写情绪不写心理。\n`;
+  p += `3f. ⚠️ 动作线两层：第一层"道具任务"（吃饭/擦刀）只能来自剧本或导演；第二层"情绪驱动肢体"（往前走一步/转身/撑桌子/后退）是说话/听话时身体自然会做的事，必须写。没有第一层时第二层就是全部身体表演。\n`;
+  p += `3g. ⚠️ 听者身体反应：说话人说完立刻切走拍听者。听者是身体先动不是脸先动——上半身往后靠/手悬空/肩膀缩/笔掉了。说话人不能连续占两个以上镜号。\n`;
+  p += `4. C部分第一段第一句锚定入场景别和视角。\n`;
+  p += `5. 最后一段最后一句锚定出场景别和视角，并标注接棒物。\n`;
   if (segIndex === 0) {
     p += `6. 这是第一个片段，无上一片段接棒，【片段衔接核对】写"无上一片段"。\n`;
   } else {
@@ -752,10 +790,14 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
   p += `\n`;
 
   p += `【镜号规划（严格执行）】\n`;
-  p += `片段：${segPlan.id}  ${segPlan.title}  总时长：${segPlan.duration}秒\n`;
+  p += `片段：${segPlan.id}  ${segPlan.title}  总时长：${segPlan.duration}秒`;
+  if (segPlan.arc_position) p += `  弧线位置：${segPlan.arc_position}  强度：${segPlan.intensity || ''}`;
+  p += `\n`;
   for (const shot of (segPlan.shots || [])) {
-    p += `镜${shot.num}  ${shot.duration}s · ${shot.focal}  `;
+    const shotType = shot.shot_type || shot.focal || '';
+    p += `镜${shot.num}  ${shot.duration}s · ${shotType}  `;
     p += `任务：${shot.task}`;
+    if (shot.five_stage) p += `  [五段式：${shot.five_stage}]`;
     if (shot.dialogue) p += `  ★台词：${shot.dialogue}`;
     p += `\n`;
   }
@@ -1070,10 +1112,12 @@ async function processSceneSingleShot(scene, costumeCard, config, job, sceneInde
   userMsg += `14. A部分格式统一：所有片段的A部分用相同格式，不加方括号，参数用·分隔。\n`;
   userMsg += `15. 导演标注了⚠️/一定要/必须的内容，C部分叙事中必须明确体现（如"重音"→写"刻意加重咬字"）。\n`;
   userMsg += `16. 导演描述的连贯走位调度放在同一个片段，不拆开。\n`;
+  userMsg += `17. ⚠️ 动作线两层：第一层"道具任务"（吃饭/擦刀）只能来自剧本或导演，不编；第二层"情绪驱动肢体"（往前走一步/转身/撑桌子）是人说话时身体自然会做的事，必须写。有第一层时B部分写明物理任务。\n`;
+  userMsg += `18. ⚠️ 听者身体反应：说话人说完立刻切走拍听者身体反应（上半身后靠/手停了/肩缩了），不是只拍脸。说话人不能连续占两个以上镜号。\n`;
 
   // 检测转场指令
   if (scene.content.includes('转场') || scene.content.includes('无缝衔接')) {
-    userMsg += `17. ⚠️ 导演指定了转场方式，最后一个片段的最后一镜必须完成转场设计，不能截断。\n`;
+    userMsg += `19. ⚠️ 导演指定了转场方式，最后一个片段的最后一镜必须完成转场设计，不能截断。\n`;
   }
   userMsg += `\n`;
 
