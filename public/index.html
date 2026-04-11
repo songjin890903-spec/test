@@ -146,6 +146,7 @@ textarea { resize: vertical; min-height: 80px; }
         <select id="apiType" onchange="onApiTypeChange()">
           <option value="anthropic">Anthropic Claude</option>
           <option value="openai">OpenAI 兼容</option>
+          <option value="gemini">Google Gemini</option>
         </select>
       </div>
       <div>
@@ -160,6 +161,11 @@ textarea { resize: vertical; min-height: 80px; }
             <option value="deepseek-chat">DeepSeek Chat</option>
             <option value="deepseek-reasoner">DeepSeek Reasoner</option>
           </optgroup>
+          <optgroup label="Google Gemini" id="modelGroupGemini" style="display:none">
+            <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+            <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+          </optgroup>
           <option value="_custom">自定义...</option>
         </select>
         <input type="text" id="modelCustom" class="hidden" placeholder="输入自定义模型名" style="margin-top:6px">
@@ -170,9 +176,9 @@ textarea { resize: vertical; min-height: 80px; }
         <label>API Key</label>
         <input type="password" id="apiKey" placeholder="sk-...">
       </div>
-      <div id="apiUrlWrap" class="hidden">
-        <label>API URL</label>
-        <input type="text" id="apiUrl" placeholder="https://api.deepseek.com/v1/chat/completions">
+      <div id="apiUrlWrap">
+        <label>API URL（留空用默认，可填中转站）</label>
+        <input type="text" id="apiUrl" placeholder="留空=官方地址 / 或填中转站 URL">
       </div>
     </div>
   </div>
@@ -405,14 +411,28 @@ function switchMode(mode) {
 }
 
 function onApiTypeChange() {
-  const isOai = document.getElementById('apiType').value === 'openai';
-  document.getElementById('apiUrlWrap').classList.toggle('hidden', !isOai);
+  const apiType = document.getElementById('apiType').value;
+  // URL 框始终显示，方便使用中转站
+  document.getElementById('apiUrlWrap').classList.remove('hidden');
   // 切换模型下拉框的选项组
-  document.getElementById('modelGroupClaude').style.display = isOai ? 'none' : '';
-  document.getElementById('modelGroupOai').style.display = isOai ? '' : 'none';
+  document.getElementById('modelGroupClaude').style.display = apiType === 'anthropic' ? '' : 'none';
+  document.getElementById('modelGroupOai').style.display = apiType === 'openai' ? '' : 'none';
+  document.getElementById('modelGroupGemini').style.display = apiType === 'gemini' ? '' : 'none';
   // 自动选中对应组的第一个选项
-  document.getElementById('model').value = isOai ? 'deepseek-chat' : 'claude-sonnet-4-6';
+  const defaultModel = {
+    anthropic: 'claude-sonnet-4-6',
+    openai: 'deepseek-chat',
+    gemini: 'gemini-2.5-pro'
+  }[apiType];
+  document.getElementById('model').value = defaultModel;
   document.getElementById('modelCustom').classList.add('hidden');
+  // 根据 API 类型更新 URL placeholder 提示
+  const placeholders = {
+    anthropic: '留空=https://api.anthropic.com / 或填中转站',
+    openai: '例如 https://api.deepseek.com/v1/chat/completions',
+    gemini: '留空=https://generativelanguage.googleapis.com / 或填中转站'
+  };
+  document.getElementById('apiUrl').placeholder = placeholders[apiType];
 }
 
 function onModelChange() {
