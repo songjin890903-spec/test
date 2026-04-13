@@ -12,6 +12,7 @@ app.use(express.json({ limit: '20mb' }));
 app.use(express.static('public'));
 
 const jobs = new Map();
+const agentAJobs = new Map();  // 提前声明，与 jobs 同级，避免顶部 TTL 清理用 global 绕行
 
 // ============================================================
 // Job TTL 清理：避免 jobs / agentAJobs 两个 Map 无界增长
@@ -20,7 +21,7 @@ const jobs = new Map();
 const JOB_TTL_MS = 60 * 60 * 1000; // 1 小时
 setInterval(() => {
   const now = Date.now();
-  for (const map of [jobs, /* agentAJobs 在文件后面声明，运行时才能拿到 */ global.__agentAJobs].filter(Boolean)) {
+  for (const map of [jobs, agentAJobs]) {
     for (const [id, job] of map) {
       if ((job.status === 'done' || job.status === 'error') && job.finishedAt && now - job.finishedAt > JOB_TTL_MS) {
         map.delete(id);
@@ -1606,13 +1607,17 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     const file = req.file;
     if (!file) return res.status(400).json({ error: '未收到上传文件，请选择文件后重试。' });
     let text = '';
-    if (file.originalname.toLowerCase().endsWith('.docx')) {
-      const result = await mammoth.extractRawText({ path: file.path });
-      text = result.value;
-    } else {
-      text = fs.readFileSync(file.path, 'utf-8');
+    try {
+      if (file.originalname.toLowerCase().endsWith('.docx')) {
+        const result = await mammoth.extractRawText({ path: file.path });
+        text = result.value;
+      } else {
+        text = fs.readFileSync(file.path, 'utf-8');
+      }
+    } finally {
+      // 无论成功还是失败都清理 temp 文件，避免 uploads/ 目录泄漏
+      try { fs.unlinkSync(file.path); } catch {}
     }
-    try { fs.unlinkSync(file.path); } catch {}
     const { scenes, episodeInfo, episodeMap } = parseScript(text);
     if (scenes.length === 0) {
       return res.status(400).json({ error: '未识别到场景。请确认文件包含"场景X-X"格式的场景标题。' });
@@ -1670,14 +1675,16 @@ app.post('/api/process', async (req, res) => {
 
   const workers = Array(Math.min(CONCURRENCY, scenes.length)).fill(null).map(() => runNext());
   Promise.all(workers)
-    .then(() => { job.status = 'done'; })
-    .catch(err => { console.error(err); job.status = 'error'; });
+    .then(() => { job.status = 'done'; job.finishedAt = Date.now(); })
+    .catch(err => { console.error(err); job.status = 'error'; job.finishedAt = Date.now(); });
 });
 
 app.get('/api/progress/:jobId', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+  // iv 必须先赋 null，避免首次同步调用 send() 时 job 已结束而触发 TDZ ReferenceError
+  let iv = null;
   const send = () => {
     const job = jobs.get(req.params.jobId);
     if (!job) { res.write(`data: {"error":"not found"}\n\n`); res.end(); return; }
@@ -1688,7 +1695,7 @@ app.get('/api/progress/:jobId', (req, res) => {
     if (job.status === 'done' || job.status === 'error') { clearInterval(iv); res.end(); }
   };
   send();
-  const iv = setInterval(send, 800);
+  iv = setInterval(send, 800);
   req.on('close', () => clearInterval(iv));
 });
 
@@ -1733,6 +1740,8 @@ app.get('/api/download-prompts/:jobId', (req, res) => {
 app.post('/api/reload-prompts', (req, res) => {
   // 清空提示词缓存，下次调用 loadPrompt 时重新读磁盘
   for (const key of Object.keys(_promptCache)) delete _promptCache[key];
+  // 同步清空规划阶段专用缓存（loadCoreForPlan 截取自 core.txt，core.txt 改动后必须一起重置）
+  delete _planCoreCache.content;
   res.json({ message: '提示词缓存已清空，下次处理时重新读取', prompts: ['core.txt', 'wenxi.txt', 'wuxi.txt', 'agent_a.md', 'agent_a_director.md'] });
 });
 
@@ -1740,9 +1749,6 @@ app.post('/api/reload-prompts', (req, res) => {
 // ============================================================
 // Agent A v6：规划 → 验证 → 执行 → 验证（与 Agent C 同级架构）
 // ============================================================
-
-const agentAJobs = new Map();
-global.__agentAJobs = agentAJobs;
 
 function stripMarkdown(text) {
   return text
@@ -1988,9 +1994,13 @@ app.post('/api/agent-a/upload', upload.single('file'), async (req, res) => {
     const file = req.file;
     if (!file) return res.status(400).json({ error: '未收到上传文件' });
     let text = '';
-    if (file.originalname.toLowerCase().endsWith('.docx')) { const r = await mammoth.extractRawText({path:file.path}); text = r.value; }
-    else text = fs.readFileSync(file.path, 'utf-8');
-    try { fs.unlinkSync(file.path); } catch {}
+    try {
+      if (file.originalname.toLowerCase().endsWith('.docx')) { const r = await mammoth.extractRawText({path:file.path}); text = r.value; }
+      else text = fs.readFileSync(file.path, 'utf-8');
+    } finally {
+      // 无论成功还是失败都清理 temp 文件，避免 uploads/ 目录泄漏
+      try { fs.unlinkSync(file.path); } catch {}
+    }
     if (!text.trim()) return res.status(400).json({ error: '文件内容为空' });
     const { scenes } = parseRawScript(text);
     console.log('📄 原始剧本上传：' + text.length + '字，' + scenes.length + '个场景');
@@ -2393,12 +2403,14 @@ app.post('/api/agent-a/annotate', async (req, res) => {
       const job = agentAJobs.get(jobId);
       const directorPrompt = loadPrompt('agent_a_director.md');
       if (!directorPrompt) {
-        job.status = 'error';
+        job.status = 'error'; job.finishedAt = Date.now();
         console.error('❌ 导演讲戏提示词文件 agent_a_director.md 未找到');
         return;
       }
       const CONCURRENCY = 4;
       let index = 0;
+      // sceneFeels[i] 在场景 i 完成后才写入；读取时用当时的最新值
+      // 并发下 prevFeel 可能为 null（上一场还未完成），属正常降级，不影响批注正确性
       const sceneFeels = new Array(scenes.length).fill(null);
 
       console.log('\n🎬 Agent A 导演讲戏批注：' + scenes.length + '个场景（映射已确认）');
@@ -2410,7 +2422,6 @@ app.post('/api/agent-a/annotate', async (req, res) => {
         if (index >= scenes.length) return;
         const i = index++;
         const scene = scenes[i];
-        const prevFeel = i > 0 ? sceneFeels[i - 1] : null;
         const sceneSegs = byScene[scene.id] || [];
 
         try {
@@ -2418,6 +2429,8 @@ app.post('/api/agent-a/annotate', async (req, res) => {
           job.progress[i] = { sceneId: scene.id, status: 'processing',
             message: segCount > 0 ? '批注中（' + segCount + '条讲戏）...' : '标注待补充...' };
 
+          // 在实际构建 prompt 时才读取上一场情绪，最大化利用并发已完成的结果
+          const prevFeel = i > 0 ? sceneFeels[i - 1] : null;
           const execPrompt = buildDirectorAnnotatePrompt(scene, scenes, sceneSegs, globals, prevFeel);
           let result = stripMarkdown(await callAPI(directorPrompt, execPrompt, config));
 
@@ -2473,7 +2486,7 @@ app.post('/api/agent-a/annotate', async (req, res) => {
         job.finalResult = allAnnotations + '\n\n[摘要失败: ' + err.message + ']';
         job.progress[job.progress.length - 1] = { sceneId: '摘要', status: 'error', message: '摘要失败' };
       }
-      job.status = 'done';
+      job.status = 'done'; job.finishedAt = Date.now();
       console.log('✓ Agent A 导演讲戏模式全部完成：' + scenes.length + '个场景');
     })();
   } else {
@@ -2484,7 +2497,8 @@ app.post('/api/agent-a/annotate', async (req, res) => {
     const planSystemPrompt = '你是专业的剧本批注规划专员。只做规划分析，不写批注正文。';
     const CONCURRENCY = 4;
     let index = 0;
-    // 存储每场的场景感受，供后续场景衔接参考
+    // sceneFeels[i] 在场景 i 完成后才写入；读取时用当时的最新值
+    // 并发下 prevFeel 可能为 null（上一场还未完成），属正常降级，不影响批注正确性
     const sceneFeels = new Array(scenes.length).fill(null);
 
     console.log('\n📝 Agent A v6 逐场景批注：' + scenes.length + '个场景（规划→验证→执行→验证）');
@@ -2493,11 +2507,12 @@ app.post('/api/agent-a/annotate', async (req, res) => {
       if (index >= scenes.length) return;
       const i = index++;
       const scene = scenes[i];
-      const prevFeel = i > 0 ? sceneFeels[i - 1] : null;
 
       try {
         // ── 第一步：规划 ──
         job.progress[i] = { sceneId: scene.id, status: 'processing', message: '规划中...' };
+        // 在实际构建 prompt 时才读取上一场情绪，最大化利用并发已完成的结果
+        const prevFeel = i > 0 ? sceneFeels[i - 1] : null;
         const planPrompt = buildAnnotationPlanPrompt(scene, scenes, soulCard, prevFeel);
         const planText = await callAPI(planSystemPrompt, planPrompt, config);
         let plan = parseAnnotationPlan(planText);
@@ -2595,7 +2610,7 @@ app.post('/api/agent-a/annotate', async (req, res) => {
       job.finalResult = allAnnotations + '\n\n[摘要失败: ' + err.message + ']';
       job.progress[job.progress.length - 1] = { sceneId: '摘要', status: 'error', message: '摘要失败' };
     }
-    job.status = 'done';
+    job.status = 'done'; job.finishedAt = Date.now();
     console.log('✓ Agent A v6 全部完成：' + scenes.length + '个场景');
   })();
   } // end else AI mode
@@ -2605,6 +2620,8 @@ app.get('/api/agent-a/progress/:jobId', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
+  // iv 必须先赋 null，避免首次同步调用 send() 时 job 已结束而触发 TDZ ReferenceError
+  let iv = null;
   const send = () => {
     const job = agentAJobs.get(req.params.jobId);
     if (!job) { res.write('data: {"error":"not found"}\n\n'); res.end(); return; }
@@ -2612,7 +2629,7 @@ app.get('/api/agent-a/progress/:jobId', (req, res) => {
     if (job.status === 'done' || job.status === 'error') { clearInterval(iv); res.end(); }
   };
   send();
-  const iv = setInterval(send, 1000);
+  iv = setInterval(send, 1000);
   req.on('close', () => clearInterval(iv));
 });
 
