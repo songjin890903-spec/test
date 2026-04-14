@@ -121,6 +121,18 @@ textarea { resize: vertical; min-height: 80px; }
 .flow-step.completed { background: rgba(34,197,94,0.15); color: #86efac; border-color: rgba(34,197,94,0.3); }
 .flow-arrow { color: #444; }
 
+/* 子步骤进度条 */
+.sub-steps { display: flex; gap: 3px; margin-top: 4px; flex-wrap: wrap; }
+.sub-step { font-size: 10px; padding: 1px 6px; border-radius: 3px; display: flex; align-items: center; gap: 2px; }
+.sub-step-done { background: rgba(34,197,94,0.12); color: #86efac; }
+.sub-step-active { background: rgba(245,158,11,0.12); color: #fcd34d; }
+.sub-step-pending { background: rgba(255,255,255,0.04); color: #555; }
+
+/* 错误通知横幅 */
+.error-banner { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 10px; font-size: 13px; color: #fca5a5; display: flex; align-items: center; gap: 8px; }
+.error-banner strong { color: #f87171; }
+
 /* 编辑器 */
 .editable-result { background: #12141c; border: 1px solid #2a2d38; border-radius: 8px; padding: 16px; min-height: 200px; max-height: 500px; overflow-y: auto; font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; }
 .editable-result:focus { outline: none; border-color: #2d5af0; }
@@ -835,11 +847,16 @@ function pollAnnotateProgress(jobId) {
         html += `<div class="progress-bar"><div class="progress-fill" style="width:${Math.round((data.completed / data.total) * 100)}%"></div></div>`;
         html += `<div class="progress-text">${data.completed} / ${data.total} 场景</div>`;
       }
+      const errScenes = (data.progress || []).filter(p => p.status === 'error');
+      if (errScenes.length > 0) {
+        const names = errScenes.map(p => escapeHtml(p.sceneId)).join('、');
+        html += `<div class="error-banner">⚠ <strong>${errScenes.length} 个场景批注失败：</strong>${names}</div>`;
+      }
       for (const p of (data.progress || [])) {
         const dotClass = p.status === 'done' ? 'dot-done'
           : p.status === 'error' ? 'dot-error'
           : p.status === 'processing' ? 'dot-processing' : 'dot-pending';
-        html += `<div class="progress-item"><span class="dot ${dotClass}"></span>${escapeHtml(p.sceneId)} ${escapeHtml(p.message)}</div>`;
+        html += `<div class="progress-item"><span class="dot ${dotClass}"></span>${escapeHtml(p.sceneId)} ${escapeHtml(p.message)}${renderSubSteps(p.steps)}</div>`;
       }
       document.getElementById('annotateStatus').innerHTML = html || '<div class="status status-loading">批注进行中...</div>';
     } else if (data.status === 'done') {
@@ -1049,12 +1066,24 @@ async function startDirectGenerate() {
 // 共享：生成进度轮询
 // ============================================================
 
+function renderSubSteps(steps) {
+  if (!steps || !steps.length) return '';
+  let html = '<div class="sub-steps">';
+  for (const s of steps) {
+    const cls = s.done ? 'sub-step-done' : s.active ? 'sub-step-active' : 'sub-step-pending';
+    const icon = s.done ? '✓' : s.active ? '●' : '○';
+    html += `<span class="sub-step ${cls}">${icon} ${escapeHtml(s.name)}</span>`;
+  }
+  html += '</div>';
+  return html;
+}
+
 function pollGenerateProgress(jobId, progressEl, resultEl, btn, mode) {
   const es = new EventSource(`/api/progress/${jobId}`);
   es.onmessage = (e) => {
     const data = JSON.parse(e.data);
     if (data.error) {
-      progressEl.innerHTML = `<div class="status status-error">${escapeHtml(data.error)}</div>`;
+      progressEl.innerHTML = `<div class="status status-error">⚠ ${escapeHtml(data.error)}</div>`;
       es.close();
       btn.disabled = false;
       btn.textContent = '开始生成提示词';
@@ -1062,13 +1091,28 @@ function pollGenerateProgress(jobId, progressEl, resultEl, btn, mode) {
     }
 
     // 渲染进度
-    let html = `<div class="progress-bar"><div class="progress-fill" style="width:${Math.round((data.completed / data.total) * 100)}%"></div></div>`;
+    const pct = data.total ? Math.round((data.completed / data.total) * 100) : 0;
+    let html = `<div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>`;
     html += `<div class="progress-text">${data.completed} / ${data.total} 场景完成</div>`;
+
+    // 错误 banner：有任何场景出错立刻显示
+    const errScenes = (data.progress || []).filter(p => p.status === 'error');
+    if (errScenes.length > 0) {
+      html += `<div class="error-banner">⚠ <strong>${errScenes.length} 个场景处理失败：</strong>${errScenes.map(p => escapeHtml(p.sceneId)).join('、')}</div>`;
+    }
+
     for (const p of (data.progress || [])) {
       const dotClass = p.status === 'done' ? 'dot-done'
         : p.status === 'error' ? 'dot-error'
         : p.status === 'processing' ? 'dot-processing' : 'dot-pending';
-      html += `<div class="progress-item"><span class="dot ${dotClass}"></span>${escapeHtml(p.sceneId)} ${escapeHtml(p.message)}</div>`;
+      html += `<div class="progress-item">
+        <span class="dot ${dotClass}"></span>
+        <div style="flex:1;min-width:0;">
+          <span style="color:${p.status==='error'?'#fca5a5':'#ccc'}">${escapeHtml(p.sceneId)}</span>
+          <span style="color:#888;font-size:11px;margin-left:6px;">${escapeHtml(p.message || '')}</span>
+          ${renderSubSteps(p.steps)}
+        </div>
+      </div>`;
     }
     progressEl.innerHTML = html;
 

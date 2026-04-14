@@ -229,20 +229,62 @@ function verifyDialogues(dialogues, output) {
   const missing = [];
   for (const d of dialogues) {
     const colonIdx = d.indexOf('：');
-    if (colonIdx === -1) continue;
-    const contentPart = d.substring(colonIdx + 1).trim().replace(QUOTE_STRIP_RE, '');
-    const coreText = contentPart.slice(0, 15);
-    if (coreText && !cleanOutput.includes(coreText)) missing.push(d);
+    // ⚠️ 不跳过无冒号项：seg.shots[].dialogue 是纯内容（无"角色："前缀），也需要核验
+    const contentPart = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d)
+      .trim().replace(QUOTE_STRIP_RE, '');
+    if (!contentPart) continue;
+
+    // ── 多锚点检查（防吞句）──────────────────────────────────
+    // 只检前15字会导致"头部出现就通过，中间子句被吞"
+    // 按句末标点拆子句，每句取前10字做锚点，任一缺失=整条台词遗漏
+    const clauses = contentPart.split(/(?<=[？！。])/g)
+      .map(s => s.trim()).filter(s => s.length >= 4);
+    let isMissing;
+    if (clauses.length > 1) {
+      isMissing = clauses.some(c => {
+        const anchor = c.slice(0, 10);
+        return anchor && !cleanOutput.includes(anchor);
+      });
+    } else {
+      // 单句或极短台词：沿用前15字
+      const coreText = contentPart.slice(0, 15);
+      isMissing = !!(coreText && !cleanOutput.includes(coreText));
+    }
+    if (isMissing) missing.push(d);
   }
   return missing;
 }
 
+// 从一条台词中提取在 cleanOutput 里真正缺失的子句列表
+function getMissingClauses(d, cleanOutput) {
+  const colonIdx = d.indexOf('：');
+  const contentPart = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d)
+    .trim().replace(QUOTE_STRIP_RE, '');
+  const clauses = contentPart.split(/(?<=[？！。])/g)
+    .map(s => s.trim()).filter(s => s.length >= 4);
+  return clauses.filter(c => {
+    const anchor = c.slice(0, 10);
+    return anchor && !cleanOutput.includes(anchor);
+  });
+}
+
 async function repairMissingDialogues(missing, existingOutput, systemPrompt, config) {
   console.log(`⚠️ 发现 ${missing.length} 条台词遗漏，自动补写中...`);
+  const cleanExisting = existingOutput.replace(/<analysis>[\s\S]*?<\/analysis>/g, '');
   let repairMsg = `以下台词或OS独白在刚才的输出中被遗漏，必须补写进对应片段的C部分镜号叙事里。\n`;
   repairMsg += `请在原输出基础上找到对应片段，将遗漏台词以"角色OS：引号原文"或"角色（状态）：引号原文"格式写进对应镜号叙事正文，输出补写后的完整内容。\n\n`;
   repairMsg += `【遗漏台词清单】\n`;
-  missing.forEach((d, i) => { repairMsg += `遗漏${i + 1}：${d}\n`; });
+  missing.forEach((d, i) => {
+    const colonIdx = d.indexOf('：');
+    const charPrefix = colonIdx >= 0 ? d.substring(0, colonIdx + 1) : '';
+    const missingClauses = getMissingClauses(d, cleanExisting);
+    if (missingClauses.length > 0 && missingClauses.length < d.split(/(?<=[？！。])/g).filter(s => s.trim().length >= 4).length) {
+      // 部分子句缺失：只报告缺失的那几句，避免模型把已有部分重复写入
+      repairMsg += `遗漏${i + 1}：${charPrefix}${missingClauses.join('')}（注：此台词其余句已存在，只需补入这几句）\n`;
+    } else {
+      repairMsg += `遗漏${i + 1}：${d}\n`;
+    }
+  });
   repairMsg += `\n【原输出】\n${existingOutput}\n\n`;
   repairMsg += `请直接输出补全后的完整提示词，格式与原输出完全一致，不要任何解释。`;
   return await callAPI(systemPrompt, repairMsg, config);
@@ -696,7 +738,7 @@ function buildPlanPrompt(scene, costumeCard, dialogues) {
   p += `   · >3秒台词：必须拆成多个镜号——起始镜号放dialogue，后续镜号task写切镜方式（换角度/反打听者/INSERT细节/声画分离），禁止单个镜号对着一个人说话超过3秒。\n`;
   p += `   · >8秒台词/OS独白：多镜号中必须包含至少一个声画分离镜号（task写"声画分离：XX台词继续，画面切XXX"），把镜头交出去看别的。\n`;
   p += `   · >15秒台词/OS独白：声画分离镜号可以跨片段，声音不断画面跨片段过渡。\n`;
-  p += `4. 每句台词不得遗漏，不得重复。\n`;
+  p += `4. ⚠️【强制】剧本中每一条台词都必须出现在某个镜号的dialogue字段里，一条都不能漏。规划前先数清共有几条台词，规划后逐条确认每条台词都有对应的dialogue字段，否则程序验证会失败并强制重新规划。\n`;
   p += `5. 导演讲戏中标注"必须补"或"⚠️必须"的内容必须出现在某个镜号的task里。\n`;
   p += `6. 台词之间的反应镜头（呼吸感）：\n`;
   p += `   · 角色A说完台词后，不要直接让角色B接台词。中间插一个反应镜号（1-2s）：听者表情变化/沉默/身体反应\n`;
@@ -762,6 +804,11 @@ function buildPlanPrompt(scene, costumeCard, dialogues) {
   p += `\n`;
 
   if (dialogues.length > 0) {
+    p += `【台词清单（规划前逐条对照，每条必须进入某个镜号的dialogue字段）】\n`;
+    dialogues.forEach((d, i) => {
+      p += `台词${i + 1}：${d}\n`;
+    });
+    p += `⚠️ 共 ${dialogues.length} 条台词，规划完成后逐条确认是否全部出现在dialogue字段。有遗漏=验证失败=强制重新规划。\n\n`;
     p += `【程序预算：本场台词最短时长】\n${budgetLines}\n\n`;
   }
 
@@ -843,7 +890,10 @@ function parsePlan(planText) {
 }
 
 // 程序层验证规划
-function validatePlan(plan, dialogues, limits, minSegments) {
+// relaxed=true 用于第二次尝试：片段数不足降为警告（不阻断），只有台词遗漏还是硬错误。
+// 理由：re-plan 时模型常常能修好台词但把片段数压低，与其降级到单次模式（更差），
+// 不如用片段数略少但台词完整的规划继续，质量远胜单次。
+function validatePlan(plan, dialogues, limits, minSegments, relaxed = false) {
   const errors = [];
   const warnings = [];
   const isDirectorMode = minSegments && minSegments > 1;
@@ -851,7 +901,12 @@ function validatePlan(plan, dialogues, limits, minSegments) {
 
   // 片段数量下限检查（导演讲戏模式）
   if (isDirectorMode && plan.segments.length < minSegments) {
-    errors.push(`片段数量${plan.segments.length}个，导演指令量需要至少${minSegments}个片段`);
+    const msg = `片段数量${plan.segments.length}个，导演指令量需要至少${minSegments}个片段`;
+    if (relaxed) {
+      warnings.push(msg); // 第二次尝试：片段数不足仅警告，不阻断
+    } else {
+      errors.push(msg);
+    }
   }
 
   for (let i = 0; i < plan.segments.length; i++) {
@@ -906,15 +961,28 @@ function validatePlan(plan, dialogues, limits, minSegments) {
 
   for (const d of dialogues) {
     const colonIdx = d.indexOf('：');
-    const core = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d)
-      .trim().replace(QUOTE_STRIP_RE, '').slice(0, 12);
-    if (core && !plannedConcat.includes(core)) {
-      if (isDirectorMode) {
-        // 导演模式：台词未分配降级为警告（台词在C部分写作时会由验证器补写）
-        warnings.push(`台词未被分配到任何镜号：${d.slice(0, 25)}...`);
-      } else {
-        errors.push(`台词未被分配到任何镜号：${d.slice(0, 25)}...`);
-      }
+    const contentFull = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d)
+      .trim().replace(QUOTE_STRIP_RE, '');
+
+    // 多锚点：长台词按子句分别检查，防止只有头部被分配而后续子句遗漏
+    const clauses = contentFull.split(/(?<=[？！。])/g)
+      .map(s => s.trim()).filter(s => s.length >= 4);
+    let missingClause = null;
+    if (clauses.length > 1) {
+      missingClause = clauses.find(c => {
+        const anchor = c.slice(0, 10);
+        return anchor && !plannedConcat.includes(anchor);
+      });
+    } else {
+      const core = contentFull.slice(0, 12);
+      if (core && !plannedConcat.includes(core)) missingClause = d;
+    }
+
+    if (missingClause) {
+      // 台词遗漏在任何模式下都是硬错误：导演模式片段多、约束复杂，更不能让未分配台词
+      // 悄悄通过——会导致4条台词全部堆到最后一个片段补写，破坏叙事连贯性。
+      // 错误信息附上完整台词原文，让 re-plan prompt 里模型能看清楚要分配哪条。
+      errors.push(`台词未被分配到任何镜号（必须加入某个镜号的dialogue字段）：${d}`);
     }
   }
 
@@ -925,6 +993,93 @@ function validatePlan(plan, dialogues, limits, minSegments) {
   }
 
   return errors;
+}
+
+// ── 程序强制注入遗漏台词 ──────────────────────────────────────────────────────
+// 在 parsePlan 之后立刻调用，确保规划里每条台词都有对应的 dialogue 字段。
+// 台词分配是程序能 100% 保证的事，不应进入"验证→重试"流程。
+// 检测逻辑与 validatePlan 完全一致（多锚点），避免两者标准不同导致注入后仍报错。
+function forceInjectMissingDialogues(plan, dialogues) {
+  if (!plan?.segments?.length || !dialogues?.length) return plan;
+
+  // 1. 建立 dialogue_index → segmentIndex 映射（按最先出现的片段记录）
+  const segForDialogue = new Map();
+  const plannedConcat = plan.segments
+    .flatMap(s => s.shots || [])
+    .map(s => (s.dialogue || '').replace(QUOTE_STRIP_RE, ''))
+    .join('\n');
+
+  for (let segIdx = 0; segIdx < plan.segments.length; segIdx++) {
+    const seg = plan.segments[segIdx];
+    const shotTexts = (seg.shots || []).map(s => (s.dialogue || '').replace(QUOTE_STRIP_RE, '')).join('\n');
+    for (let dIdx = 0; dIdx < dialogues.length; dIdx++) {
+      if (segForDialogue.has(dIdx)) continue;
+      const d = dialogues[dIdx];
+      const colonIdx = d.indexOf('：');
+      const content = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d).trim().replace(QUOTE_STRIP_RE, '');
+      // 用多锚点检测：所有子句都出现才算"已分配"
+      const clauses = content.split(/(?<=[？！。])/g).map(s => s.trim()).filter(s => s.length >= 4);
+      const allPresent = clauses.length > 1
+        ? clauses.every(c => { const a = c.slice(0, 10); return a && plannedConcat.includes(a); })
+        : plannedConcat.includes(content.slice(0, 12));
+      if (allPresent && shotTexts.includes(content.slice(0, 10))) {
+        segForDialogue.set(dIdx, segIdx);
+      }
+    }
+  }
+
+  // 2. 找出遗漏台词——使用与 validatePlan 完全相同的多锚点逻辑
+  const missingIndices = [];
+  for (let dIdx = 0; dIdx < dialogues.length; dIdx++) {
+    const d = dialogues[dIdx];
+    const colonIdx = d.indexOf('：');
+    const contentFull = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d).trim().replace(QUOTE_STRIP_RE, '');
+    const clauses = contentFull.split(/(?<=[？！。])/g).map(s => s.trim()).filter(s => s.length >= 4);
+    let isMissing;
+    if (clauses.length > 1) {
+      isMissing = clauses.some(c => { const a = c.slice(0, 10); return a && !plannedConcat.includes(a); });
+    } else {
+      const core = contentFull.slice(0, 12);
+      isMissing = core && !plannedConcat.includes(core);
+    }
+    if (isMissing) missingIndices.push(dIdx);
+  }
+
+  if (missingIndices.length === 0) return plan;
+  console.log(`📌 程序强制注入 ${missingIndices.length} 条遗漏台词...`);
+
+  // 3. 对每条遗漏台词，找最近邻已分配台词所在片段，追加新镜号
+  for (const dIdx of missingIndices) {
+    let targetSegIdx = -1;
+    for (let i = dIdx - 1; i >= 0; i--) {
+      if (segForDialogue.has(i)) { targetSegIdx = segForDialogue.get(i); break; }
+    }
+    if (targetSegIdx === -1) {
+      for (let i = dIdx + 1; i < dialogues.length; i++) {
+        if (segForDialogue.has(i)) { targetSegIdx = segForDialogue.get(i); break; }
+      }
+    }
+    if (targetSegIdx === -1) targetSegIdx = plan.segments.length - 1;
+
+    const d = dialogues[dIdx];
+    const colonIdx = d.indexOf('：');
+    const charName = colonIdx >= 0 ? d.substring(0, colonIdx) : '';
+    const content = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d).trim();
+    const minDur = Math.min(Math.max(calcMinDuration(d), 2), 5);
+    const seg = plan.segments[targetSegIdx];
+    if (!seg.shots) seg.shots = [];
+    seg.shots.push({
+      num: seg.shots.length + 1,
+      duration: minDur,
+      shot_type: '[中近景]',
+      task: `${charName ? charName + '说台词' : '台词'}·听者基线反应`,
+      dialogue: content
+    });
+    segForDialogue.set(dIdx, targetSegIdx);
+    console.log(`   → 台词${dIdx + 1} 注入到 ${seg.id}：${d.slice(0, 40)}`);
+  }
+
+  return plan;
 }
 
 // 构建单片段写作 prompt
@@ -1172,6 +1327,21 @@ function generateScenePlanBlock(plan, scene, dialogues) {
   return `<scene_plan>\n${text}\n</scene_plan>`;
 }
 
+// ── 场景进度辅助：携带子步骤供前端渲染进度条 ──────────────────
+// steps 固定四项：规划 / A参数 / 写作 / 验证
+// doneCount = 已完成数量（0-4）；当前 active = doneCount 那一项
+function setSceneProgress(job, idx, sceneId, status, message, doneCount = 0) {
+  const STEP_NAMES = ['规划', 'A参数', '写作', '验证'];
+  job.progress[idx] = {
+    sceneId, status, message,
+    steps: STEP_NAMES.map((name, i) => ({
+      name,
+      done: i < doneCount,
+      active: i === doneCount && status === 'processing'
+    }))
+  };
+}
+
 // 多步处理一个场景：规划 → 逐片段写作
 async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex) {
   const systemPrompt = buildSystemPrompt(scene.sceneType);
@@ -1179,9 +1349,7 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
   const dialogues = extractDialogues(scene.content);
 
   // ── 第一步：规划 ─────────────────────────────────────────
-  job.progress[sceneIndex] = {
-    sceneId: scene.id, status: 'processing', message: '规划中...'
-  };
+  setSceneProgress(job, sceneIndex, scene.id, 'processing', '规划中...', 0);
 
   let plan = null;
   const directorShots = extractDirectorShots(scene.content);
@@ -1204,34 +1372,43 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
   }
 
   // ── 第一次尝试 ───────────────────────────────────────────
+  // 拿到规划后立刻注入遗漏台词：台词分配由程序保证，不走"验证→重试"流程。
+  // 后续 validatePlan 只处理结构性问题（时长/镜号数/片段数）。
   const planText1 = await callAPI(planSystemPrompt, buildPlanPrompt(scene, costumeCard, dialogues), config);
-  plan = parsePlan(planText1);
+  let plan1 = parsePlan(planText1);
+  if (plan1) plan1 = forceInjectMissingDialogues(plan1, dialogues);
 
-  if (!plan) {
-    console.log(`⚠️ ${scene.id} 规划JSON解析失败，降级`);
+  if (!plan1) {
+    console.log(`⚠️ ${scene.id} 规划JSON解析失败`);
   } else {
-    const errors1 = validatePlan(plan, dialogues, limits, minSegments);
+    const errors1 = validatePlan(plan1, dialogues, limits, minSegments);
     if (errors1.length === 0) {
-      console.log(`✓ ${scene.id} 规划通过，共${plan.segments.length}个片段`);
+      console.log(`✓ ${scene.id} 规划通过，共${plan1.segments.length}个片段`);
+      plan = plan1;
     } else {
-      // ── 第一次失败：带错误重新规划 ────────────────────────
-      console.log(`⚠️ ${scene.id} 规划验证失败，修正中：\n${errors1.join('\n')}`);
+      // ── 结构性错误 → 带错误信息重新规划 ────────────────────
+      console.log(`⚠️ ${scene.id} 规划有结构问题，修正中：\n${errors1.join('\n')}`);
       const fixPrompt = buildPlanPrompt(scene, costumeCard, dialogues)
-        + `\n\n上次规划有以下错误，请修正后重新输出JSON：\n`
+        + `\n\n上次规划有以下结构错误，请修正后重新输出JSON：\n`
         + errors1.map(e => `- ${e}`).join('\n');
       const planText2 = await callAPI(planSystemPrompt, fixPrompt, config);
-      plan = parsePlan(planText2);
+      let plan2 = parsePlan(planText2);
+      if (plan2) plan2 = forceInjectMissingDialogues(plan2, dialogues);
 
-      if (!plan) {
-        console.log(`⚠️ ${scene.id} 修正规划JSON解析失败，降级`);
+      if (!plan2) {
+        console.log(`⚠️ ${scene.id} 修正规划JSON解析失败，使用plan1继续`);
+        plan = plan1; // plan1 台词已注入，结构略差但可用
       } else {
-        const errors2 = validatePlan(plan, dialogues, limits, minSegments);
+        // 第二次验证放宽片段数（relaxed=true）
+        const errors2 = validatePlan(plan2, dialogues, limits, minSegments, true);
         if (errors2.length === 0) {
-          console.log(`✓ ${scene.id} 修正规划通过，共${plan.segments.length}个片段`);
+          console.log(`✓ ${scene.id} 修正规划通过，共${plan2.segments.length}个片段`);
+          plan = plan2;
         } else {
-          // 两次都有验证错误 → 降级，不带着坏规划继续
-          console.log(`⚠️ ${scene.id} 修正规划仍有错误，降级：\n${errors2.join('\n')}`);
-          plan = null;
+          // 两次规划都有结构问题：选片段数更多的那个继续（台词都已注入，不再降级单次）
+          console.log(`⚠️ ${scene.id} 两次规划均有结构问题，取较优规划继续：\n${errors2.join('\n')}`);
+          plan = plan2.segments.length >= plan1.segments.length ? plan2 : plan1;
+          console.log(`   → 使用 ${plan === plan2 ? 'plan2' : 'plan1'}（${plan.segments.length}个片段）`);
         }
       }
     }
@@ -1302,10 +1479,7 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
 
   // 没有B → 用AI生成一次A部分
   if (!referenceA) {
-    job.progress[sceneIndex] = {
-      sceneId: scene.id, status: 'processing',
-      message: '生成画面物理系统参数...'
-    };
+    setSceneProgress(job, sceneIndex, scene.id, 'processing', '生成画面物理系统参数...', 1);
     try {
       const aPrompt = `请为以下场景生成【A】画面物理系统参数。只输出A部分，不要B/C/D/E/F。\n`
         + `格式：不加方括号，参数用·分隔，包含：画风·影像质感·材质·光·氛围·渲染。\n`
@@ -1397,10 +1571,7 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
   }
 
   // 并行写所有片段（全部带参考A部分）
-  job.progress[sceneIndex] = {
-    sceneId: scene.id, status: 'processing',
-    message: `并行写作 ${plan.segments.length} 个片段...`
-  };
+  setSceneProgress(job, sceneIndex, scene.id, 'processing', `并行写作 ${plan.segments.length} 个片段...`, 2);
 
   const segmentPromises = plan.segments.map((seg, si) =>
     writeAndVerifySegment(seg, si, referenceA).catch(err => {
@@ -1419,6 +1590,7 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
 
   // ── 全场景台词总检 + 补写 ─────────────────────────────────
   // 所有片段拼合后，用完整台词表再查一遍，防止跨片段遗漏
+  setSceneProgress(job, sceneIndex, scene.id, 'processing', '台词总检...', 3);
   if (dialogues.length > 0) {
     const finalMissing = verifyDialogues(dialogues, outputs.join('\n'));
     if (finalMissing.length > 0) {
@@ -1655,13 +1827,13 @@ app.post('/api/process', async (req, res) => {
 
     try {
       const result = await processSceneMultiStep(scene, costumeCard, config, job, i);
-      job.progress[i] = { sceneId: scene.id, status: 'done', message: '完成 ✓' };
+      setSceneProgress(job, i, scene.id, 'done', '完成 ✓', 4);
       job.results[i] = {
         sceneId: scene.id, sceneHeader: scene.header,
         sceneType: scene.sceneType, episode: scene.episode, content: result
       };
     } catch (err) {
-      job.progress[i] = { sceneId: scene.id, status: 'error', message: `错误: ${err.message}` };
+      setSceneProgress(job, i, scene.id, 'error', `错误: ${err.message}`, 0);
       job.results[i] = {
         sceneId: scene.id, sceneHeader: scene.header,
         sceneType: scene.sceneType, episode: scene.episode,
