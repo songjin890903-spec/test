@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pkill -f \"node server.js\")",
+      "Bash(node server.js)",
+      "Bash(tee server.log)"
+    ]
+  }
+}
