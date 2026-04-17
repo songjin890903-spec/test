@@ -1,3 +1,4 @@
+const annotationV7 = require('./annotation_v7');
 const express = require('express');
 const multer = require('multer');
 const mammoth = require('mammoth');
@@ -45,6 +46,26 @@ const SCENE_RULES = {
 
 // 台词核验用的引号剥离正则（统一维护，避免各处不一致）
 const QUOTE_STRIP_RE = /[""「」『』"']/g;
+
+// 台词"分配完整性"检测用的归一化正则·去除拆句符号和空白
+// 原因：LLM 有时把一条台词拆到两个镜号，中间加 ——、…、空白或换行，
+// 导致裸的 String.includes 匹配断裂·validator 误报遗漏·forceInject 重复注入。
+// 归一化后的字符串仅用于 includes 检测，不用于输出。
+const DIALOGUE_MATCH_NORM_RE = /[""「」『』"'——─—…\s]+/g;
+
+// 剥离台词里的演员指导（中文或英文括号包围的内容）
+// 例："赵一铭（不耐烦且有些慌乱）：怎么可能？（略一犹豫）没关系..."
+//      → "赵一铭：怎么可能？没关系..."
+// LLM 写进 plan 的台词不会保留这些括号注释，如果匹配时不剥离，锚点就会
+// 包含 "（略一犹豫）" 这种 plan 里根本不存在的文字，导致 validator 误报遗漏。
+const DIRECTOR_NOTE_RE = /[（(][^）)]*[）)]/g;
+function stripDirectorNote(s) {
+  return (s || '').replace(DIRECTOR_NOTE_RE, '');
+}
+
+function normalizeDialogueForMatch(s) {
+  return (s || '').replace(DIALOGUE_MATCH_NORM_RE, '');
+}
 
 // ============================================================
 // 大运动动词词库（武戏判定 / 片段二次校验共用）
@@ -131,12 +152,51 @@ function loadCoreForPlan() {
   return planCore;
 }
 
-function buildSystemPrompt(sceneType) {
-  const core = loadPrompt('core.txt');
-  if (sceneType === 'wuxi') return core + '\n\n' + loadPrompt('wuxi.txt');
-  // wenxi 或 mixed（含混合场景）都只加载 wenxi——
-  // 混合场景按文戏规则写整个片段，武戏动作当作"大幅度的情绪驱动肢体"来处理
-  return core + '\n\n' + loadPrompt('wenxi.txt');
+function buildSystemPrompt(sceneType, options = {}) {
+  // v7 用 core_v7.txt + wenxi_core_v7.txt（范例独立加载）
+  const core = loadPrompt('core_v7.txt');
+  if (sceneType === 'wuxi') return core + '\n\n' + loadPrompt('wuxi_v7.txt');
+
+  // 文戏/混合：默认只加载 wenxi_core_v7（不含范例·大幅缩小 prompt）
+  let prompt = core + '\n\n' + loadPrompt('wenxi_core_v7.txt');
+
+  // 按需注入对应范例（命中一个就加·不加载全部）
+  if (options.sceneContent) {
+    const examples = loadPrompt('wenxi_examples_v7.txt');
+    const content = options.sceneContent;
+
+    const exampleRanges = [];
+    if (/吃饭|饮酒|围坐|酒桌|吃面/.test(content)) {
+      exampleRanges.push(['▌文戏写法范例一', '▌文戏写法范例二']);
+    }
+    if (/擦刀|擦剑|擦枪|整理|修|刻|削苹果/.test(content)) {
+      exampleRanges.push(['▌文戏写法范例二', '▌文戏写法范例三']);
+    }
+    if (options.dialogueCount >= 3 && options.characterCount >= 3) {
+      exampleRanges.push(['▌文戏写法范例三', '▌文戏写法范例四']);
+    }
+    if (options.dialogueCount >= 4 && options.characterCount === 2) {
+      exampleRanges.push(['▌文戏写法范例四', '▌文戏写法范例五']);
+    }
+    if (options.hasLongOS) {
+      exampleRanges.push(['▌文戏写法范例五', '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n▌写戏方法论']);
+    }
+
+    if (exampleRanges.length > 0) {
+      let injected = '\n\n━━━ 按需注入的范例 ━━━\n';
+      // 最多注入 1 个范例·避免 prompt 膨胀
+      for (const [startMark, endMark] of exampleRanges.slice(0, 1)) {
+        const si = examples.indexOf(startMark);
+        const ei = examples.indexOf(endMark, si + 1);
+        if (si >= 0 && ei > si) {
+          injected += examples.substring(si, ei) + '\n';
+        }
+      }
+      prompt += injected;
+    }
+  }
+
+  return prompt;
 }
 
 // ============================================================
@@ -226,12 +286,22 @@ function extractDialogues(sceneContent) {
 function verifyDialogues(dialogues, output) {
   // 先剥离analysis块：台词分配表在analysis里不算C部分已落实
   const cleanOutput = output.replace(/<analysis>[\s\S]*?<\/analysis>/g, '');
+  // 归一化整个输出（同 validatePlan / forceInjectMissingDialogues 标准）
+  // 防止 LLM 在最终输出里把台词拆到多个镜号中间加 ——、省略号、换行导致锚点断裂
+  const cleanOutputNorm = normalizeDialogueForMatch(cleanOutput);
+  // ─── 已知极端 case（不做特殊处理）───
+  // 台词整句被拆到两个镜号·中间插入过渡文本（"XXX继续说："之类）。
+  // 归一化去 ——\n 仍然解决不了"中间有新文字"。
+  // 但这种拆法在 forceInject 修复后出现概率极低·且加算法会引入更多误报风险·
+  // 故保持现状·依赖 forceInject 本身不再产生重复台词。
   const missing = [];
   for (const d of dialogues) {
     const colonIdx = d.indexOf('：');
     // ⚠️ 不跳过无冒号项：seg.shots[].dialogue 是纯内容（无"角色："前缀），也需要核验
-    const contentPart = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d)
-      .trim().replace(QUOTE_STRIP_RE, '');
+    // 同时剥离演员指导括号（略一犹豫）·防止锚点里带 LLM 最终输出里不会保留的文字
+    const contentPart = stripDirectorNote(
+      (colonIdx >= 0 ? d.substring(colonIdx + 1) : d)
+    ).trim().replace(QUOTE_STRIP_RE, '');
     if (!contentPart) continue;
 
     // ── 多锚点检查（防吞句）──────────────────────────────────
@@ -242,13 +312,28 @@ function verifyDialogues(dialogues, output) {
     let isMissing;
     if (clauses.length > 1) {
       isMissing = clauses.some(c => {
-        const anchor = c.slice(0, 10);
-        return anchor && !cleanOutput.includes(anchor);
+        const anchor = normalizeDialogueForMatch(c.slice(0, 10));
+        return anchor && !cleanOutputNorm.includes(anchor);
       });
     } else {
-      // 单句或极短台词：沿用前15字
-      const coreText = contentPart.slice(0, 15);
-      isMissing = !!(coreText && !cleanOutput.includes(coreText));
+      // 单句：进一步用逗号拆分细粒度子锚点
+      // 原因：LLM 可能把一整句拆到两个镜号·中间插入"XXX继续说："等过渡文本
+      // 使 ——\n 归一化无效。细拆后至少各逗号段能独立匹配。
+      // 每段取 length>=2（短至"瑶妹"也保留·以便检测子段是否丢失）
+      const subClauses = contentPart.split(/[，,、]/g)
+        .map(s => s.trim()).filter(s => s.length >= 2);
+      if (subClauses.length > 1) {
+        isMissing = subClauses.some(c => {
+          // 每段取前 6 字做锚点（短段可能只有 2-3 字·slice 会自动裁剪）
+          const anchor = normalizeDialogueForMatch(c.slice(0, 6));
+          // 锚点至少要 2 字才有判别意义·更短直接跳过
+          return anchor.length >= 2 && !cleanOutputNorm.includes(anchor);
+        });
+      } else {
+        // 真·短句：用前10字（归一化后）做锚点
+        const coreText = normalizeDialogueForMatch(contentPart.slice(0, 10));
+        isMissing = !!(coreText && !cleanOutputNorm.includes(coreText));
+      }
     }
     if (isMissing) missing.push(d);
   }
@@ -258,13 +343,16 @@ function verifyDialogues(dialogues, output) {
 // 从一条台词中提取在 cleanOutput 里真正缺失的子句列表
 function getMissingClauses(d, cleanOutput) {
   const colonIdx = d.indexOf('：');
-  const contentPart = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d)
-    .trim().replace(QUOTE_STRIP_RE, '');
+  // 剥离演员指导括号 + 归一化输出·保持与 verifyDialogues 标准一致
+  const contentPart = stripDirectorNote(
+    (colonIdx >= 0 ? d.substring(colonIdx + 1) : d)
+  ).trim().replace(QUOTE_STRIP_RE, '');
+  const cleanOutputNorm = normalizeDialogueForMatch(cleanOutput);
   const clauses = contentPart.split(/(?<=[？！。])/g)
     .map(s => s.trim()).filter(s => s.length >= 4);
   return clauses.filter(c => {
-    const anchor = c.slice(0, 10);
-    return anchor && !cleanOutput.includes(anchor);
+    const anchor = normalizeDialogueForMatch(c.slice(0, 10));
+    return anchor && !cleanOutputNorm.includes(anchor);
   });
 }
 
@@ -590,15 +678,20 @@ async function callAPI(systemPrompt, userMessage, config) {
       }
     } else {
       const endpoint = apiUrl || 'https://api.deepseek.com/v1/chat/completions';
+const bodyObj = {
+        model: model || 'deepseek-chat',
+        max_tokens: 8192,
+        messages: [{ role: 'system', content: systemPrompt }, ...messages]
+      };
+      if (config.jsonMode) {
+        bodyObj.response_format = { type: 'json_object' };
+      }
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model: model || 'deepseek-chat',
-          max_tokens: 8192,
-          messages: [{ role: 'system', content: systemPrompt }, ...messages]
-        })
+        body: JSON.stringify(bodyObj)
       });
+
       // 429 限速：退避重试
       if (res.status === 429) {
         if (retries >= MAX_RETRIES) throw new Error(`API 限速，已重试 ${MAX_RETRIES} 次`);
@@ -613,6 +706,9 @@ async function callAPI(systemPrompt, userMessage, config) {
         throw new Error(`API HTTP ${res.status}: ${errBody.slice(0, 200)}`);
       }
       const data = await res.json();
+if (data.usage?.prompt_cache_hit_tokens) {
+        console.log(`   💾 缓存命中 ${data.usage.prompt_cache_hit_tokens} tokens（总 ${data.usage.prompt_tokens}）`);
+      }
       if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
       if (!data.choices?.[0]?.message?.content) throw new Error('API 返回了空内容（choices为空或无content字段）');
       retries = 0; // 成功响应后重置重试计数
@@ -957,12 +1053,16 @@ function validatePlan(plan, dialogues, limits, minSegments, relaxed = false) {
     .map(s => (s.dialogue || '').replace(QUOTE_STRIP_RE, ''))
     .filter(Boolean);
   // 拼成一个大字符串，一次 includes 代替嵌套 some
-  const plannedConcat = allPlanned.join('\n');
+  // 并归一化（去破折号/省略号/空白/换行）：防止 LLM 把一条台词拆到两个镜号时
+  // 中间的 "——\n" 把锚点字符串断成两半，导致本函数误报遗漏·forceInject 重复注入
+  const plannedConcat = normalizeDialogueForMatch(allPlanned.join('\n'));
 
   for (const d of dialogues) {
     const colonIdx = d.indexOf('：');
-    const contentFull = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d)
-      .trim().replace(QUOTE_STRIP_RE, '');
+    // 先剥离演员指导括号（validator 和 forceInject 必须用一致的标准）
+    const contentFull = stripDirectorNote(
+      (colonIdx >= 0 ? d.substring(colonIdx + 1) : d)
+    ).trim().replace(QUOTE_STRIP_RE, '');
 
     // 多锚点：长台词按子句分别检查，防止只有头部被分配而后续子句遗漏
     const clauses = contentFull.split(/(?<=[？！。])/g)
@@ -970,11 +1070,11 @@ function validatePlan(plan, dialogues, limits, minSegments, relaxed = false) {
     let missingClause = null;
     if (clauses.length > 1) {
       missingClause = clauses.find(c => {
-        const anchor = c.slice(0, 10);
+        const anchor = normalizeDialogueForMatch(c.slice(0, 10));
         return anchor && !plannedConcat.includes(anchor);
       });
     } else {
-      const core = contentFull.slice(0, 12);
+      const core = normalizeDialogueForMatch(contentFull.slice(0, 12));
       if (core && !plannedConcat.includes(core)) missingClause = d;
     }
 
@@ -1004,42 +1104,49 @@ function forceInjectMissingDialogues(plan, dialogues) {
 
   // 1. 建立 dialogue_index → segmentIndex 映射（按最先出现的片段记录）
   const segForDialogue = new Map();
-  const plannedConcat = plan.segments
+  // 归一化（去破折号/省略号/空白/换行）：防止 LLM 把台词拆到两个镜号时
+  // 中间的"——\n"把锚点断成两半，导致本函数误判台词未分配
+  const plannedConcat = normalizeDialogueForMatch(plan.segments
     .flatMap(s => s.shots || [])
     .map(s => (s.dialogue || '').replace(QUOTE_STRIP_RE, ''))
-    .join('\n');
+    .join('\n'));
 
   for (let segIdx = 0; segIdx < plan.segments.length; segIdx++) {
     const seg = plan.segments[segIdx];
-    const shotTexts = (seg.shots || []).map(s => (s.dialogue || '').replace(QUOTE_STRIP_RE, '')).join('\n');
+    const shotTexts = normalizeDialogueForMatch((seg.shots || []).map(s => (s.dialogue || '').replace(QUOTE_STRIP_RE, '')).join('\n'));
     for (let dIdx = 0; dIdx < dialogues.length; dIdx++) {
       if (segForDialogue.has(dIdx)) continue;
       const d = dialogues[dIdx];
       const colonIdx = d.indexOf('：');
-      const content = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d).trim().replace(QUOTE_STRIP_RE, '');
+      // 剥离演员指导括号，保证与 validatePlan 匹配标准一致
+      const content = stripDirectorNote(
+        (colonIdx >= 0 ? d.substring(colonIdx + 1) : d)
+      ).trim().replace(QUOTE_STRIP_RE, '');
       // 用多锚点检测：所有子句都出现才算"已分配"
       const clauses = content.split(/(?<=[？！。])/g).map(s => s.trim()).filter(s => s.length >= 4);
       const allPresent = clauses.length > 1
-        ? clauses.every(c => { const a = c.slice(0, 10); return a && plannedConcat.includes(a); })
-        : plannedConcat.includes(content.slice(0, 12));
-      if (allPresent && shotTexts.includes(content.slice(0, 10))) {
+        ? clauses.every(c => { const a = normalizeDialogueForMatch(c.slice(0, 10)); return a && plannedConcat.includes(a); })
+        : plannedConcat.includes(normalizeDialogueForMatch(content.slice(0, 12)));
+      if (allPresent && shotTexts.includes(normalizeDialogueForMatch(content.slice(0, 10)))) {
         segForDialogue.set(dIdx, segIdx);
       }
     }
   }
 
-  // 2. 找出遗漏台词——使用与 validatePlan 完全相同的多锚点逻辑
+  // 2. 找出遗漏台词——使用与 validatePlan 完全相同的多锚点 + 归一化逻辑
   const missingIndices = [];
   for (let dIdx = 0; dIdx < dialogues.length; dIdx++) {
     const d = dialogues[dIdx];
     const colonIdx = d.indexOf('：');
-    const contentFull = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d).trim().replace(QUOTE_STRIP_RE, '');
+    const contentFull = stripDirectorNote(
+      (colonIdx >= 0 ? d.substring(colonIdx + 1) : d)
+    ).trim().replace(QUOTE_STRIP_RE, '');
     const clauses = contentFull.split(/(?<=[？！。])/g).map(s => s.trim()).filter(s => s.length >= 4);
     let isMissing;
     if (clauses.length > 1) {
-      isMissing = clauses.some(c => { const a = c.slice(0, 10); return a && !plannedConcat.includes(a); });
+      isMissing = clauses.some(c => { const a = normalizeDialogueForMatch(c.slice(0, 10)); return a && !plannedConcat.includes(a); });
     } else {
-      const core = contentFull.slice(0, 12);
+      const core = normalizeDialogueForMatch(contentFull.slice(0, 12));
       isMissing = core && !plannedConcat.includes(core);
     }
     if (isMissing) missingIndices.push(dIdx);
@@ -1065,6 +1172,19 @@ function forceInjectMissingDialogues(plan, dialogues) {
     const colonIdx = d.indexOf('：');
     const charName = colonIdx >= 0 ? d.substring(0, colonIdx) : '';
     const content = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d).trim();
+
+    // ─── 防重复兜底：注入前在全 plan 再扫一遍，如果已在任意片段出现就跳过 ───
+    // 这是第二道保险（第一道是上面的归一化检测）。只要 LLM 把台词写成任何
+    // 认得出来的形式——完整句/拆句/加破折号/换行——就不会重复注入。
+    // 匹配前先剥离演员指导括号，保证与 validatePlan 标准一致
+    const contentNorm = normalizeDialogueForMatch(stripDirectorNote(content));
+    const anchor = contentNorm.slice(0, 10);
+    if (anchor && plannedConcat.includes(anchor)) {
+      // 已经在 plan 里了·说明这条其实没遗漏·跳过注入
+      console.log(`   ⊘ 台词${dIdx + 1} 已在 plan 中（跳过重复注入）：${d.slice(0, 40)}`);
+      continue;
+    }
+
     const minDur = Math.min(Math.max(calcMinDuration(d), 2), 5);
     const seg = plan.segments[targetSegIdx];
     if (!seg.shots) seg.shots = [];
@@ -1344,9 +1464,9 @@ function setSceneProgress(job, idx, sceneId, status, message, doneCount = 0) {
 
 // 多步处理一个场景：规划 → 逐片段写作
 async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex) {
-  const systemPrompt = buildSystemPrompt(scene.sceneType);
-  const planSystemPrompt = loadCoreForPlan(); // ✨ 规划阶段精简加载·比完整 core 少 80% 字符
   const dialogues = extractDialogues(scene.content);
+  const systemPrompt = buildSystemPrompt(scene.sceneType, { sceneContent: scene.content, dialogueCount: dialogues.length, characterCount: scene.characters.length, hasLongOS: /OS[：:]/.test(scene.content) && scene.content.length > 400 });
+  const planSystemPrompt = loadCoreForPlan(); // ✨ 规划阶段精简加载·比完整 core 少 80% 字符
 
   // ── 第一步：规划 ─────────────────────────────────────────
   setSceneProgress(job, sceneIndex, scene.id, 'processing', '规划中...', 0);
@@ -1507,8 +1627,8 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
 
     // ✨ 片段级判类型：如果 seg 有独立 sceneType（被 C 方案校验覆写过），
     // 用片段级类型加载 system prompt·这样该片段拿到的是 wuxi.txt 而不是场景级的 wenxi.txt
-    const effectiveSystemPrompt = (seg.sceneType && seg.sceneType !== scene.sceneType)
-      ? buildSystemPrompt(seg.sceneType)
+const effectiveSystemPrompt = (seg.sceneType && seg.sceneType !== scene.sceneType)
+      ? buildSystemPrompt(seg.sceneType, { sceneContent: scene.content, dialogueCount: dialogues.length, characterCount: scene.characters.length, hasLongOS: /OS[：:]/.test(scene.content) && scene.content.length > 400 })
       : systemPrompt;
 
     let segOutput = await callAPI(effectiveSystemPrompt, segPrompt, config);
@@ -1524,46 +1644,69 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
         console.log(`✓ ${seg.id} 台词核验通过`);
       }
     }
-    // 字数检查 + 自动压缩重写
+// ─── v7 字数 Cascade：先砍 F → 再砍 D → 最后才去 API 压缩 ───
     let charCount = segOutput.replace(/<analysis>[\s\S]*?<\/analysis>/g, '').trim().length;
     if (charCount > 1800) {
-      console.warn(`⚠️ ${seg.id} 字数 ${charCount}，超出 ${charCount - 1800} 字·自动压缩重写中...`);
-      const compressPrompt = `你刚才输出的片段 ${seg.id} 字数 ${charCount}·超出 1800 字硬性上限 ${charCount - 1800} 字。\n\n`
-        + `请在保持所有镜号数量、所有台词原文、所有必现目标、所有导演指令落实的前提下·压缩 C 部分的叙事描述到 1800 字以内。\n\n`
-        + `压缩方法：\n`
-        + `1. 删除所有文学化修辞（"如铁塔般沉稳"·"流露出深藏其下的温柔"·"充满了悲壮感"·"如冰冷的刀锋"等比喻和作者评论）\n`
-        + `2. 每个镜号的画面正文压到 2-3 句话·每句 ≤25 字\n`
-        + `3. （）物理反馈压到 1-2 组·每组 ≤30 字\n`
-        + `4. 只保留可拍到的物理事实：姿势·动作·视线方向·光影·环境动态\n`
-        + `5. 删除所有心理描述（"她的眼睛里混杂着无尽的委屈"等）\n`
-        + `6. 【D】尾帧 ≤3 行·【E】限制指令 ≤3 条·【F】必现目标 ≤3 条\n\n`
-        + `以下是需要压缩的原始输出：\n\n${segOutput}\n\n`
-        + `请输出压缩后的完整片段（@+A+B+C+D+E+F）·字数必须 ≤1800。直接输出·不要解释。`;
-      try {
-        const compressed = await callAPI(effectiveSystemPrompt, compressPrompt, config);
-        const newCharCount = compressed.replace(/<analysis>[\s\S]*?<\/analysis>/g, '').trim().length;
-        if (newCharCount < charCount && newCharCount <= 2000) {  // 压下来即可·不强求 1800 严格达标
-          segOutput = compressed;
-          charCount = newCharCount;
-          console.log(`✓ ${seg.id} 压缩后字数 ${charCount}`);
+      console.warn(`⚠️ ${seg.id} 字数 ${charCount}·启动 Cascade 压缩...`);
+
+      // 第一级：regex 砍 F（必现目标）——0 API 调用
+      const afterCutF = segOutput.replace(/【F】必现目标[：:]?[^【]*?(?=\n【|$)/, '').trim();
+      const c1 = afterCutF.replace(/<analysis>[\s\S]*?<\/analysis>/g, '').trim().length;
+
+      if (c1 <= 1800) {
+        segOutput = afterCutF;
+        charCount = c1;
+        console.log(`✓ ${seg.id} Cascade 级1·砍 F 后 ${c1} 字`);
+      } else {
+        // 第二级：再砍 D（尾帧）——0 API 调用
+        const afterCutDF = afterCutF.replace(/【D】尾帧[：:]?[^【]*?(?=\n【|$)/, '').trim();
+        const c2 = afterCutDF.replace(/<analysis>[\s\S]*?<\/analysis>/g, '').trim().length;
+
+        if (c2 <= 1800) {
+          segOutput = afterCutDF;
+          charCount = c2;
+          console.log(`✓ ${seg.id} Cascade 级2·砍 D+F 后 ${c2} 字`);
         } else {
-          console.warn(`⚠️ ${seg.id} 压缩失败·保留原输出（${charCount} 字）`);
+          // 第三级：API 压缩 C 修辞（最后手段·+1 次调用）
+          console.warn(`⚠️ ${seg.id} 级2 后仍 ${c2} 字·API 压缩 C...`);
+          try {
+            const compressPrompt =
+              `以下片段字数 ${c2}·超 1800·请只压缩 C 部分的形容词和修辞·不得删除任何镜号、台词、（）物理反馈。D 和 F 已经被砍过·不用再碰。\n\n原片段：\n${afterCutDF}\n\n直接输出压缩后的完整片段。`;
+            const compressed = await callAPI(effectiveSystemPrompt, compressPrompt, config);
+            const c3 = compressed.replace(/<analysis>[\s\S]*?<\/analysis>/g, '').trim().length;
+            if (c3 < c2 && c3 <= 2000) {
+              segOutput = compressed;
+              charCount = c3;
+              console.log(`✓ ${seg.id} 级3·API 压缩后 ${c3} 字`);
+            } else {
+              segOutput = afterCutDF;
+              charCount = c2;
+              console.warn(`⚠️ ${seg.id} API 压缩无效·保留级2（${c2} 字）`);
+            }
+          } catch (err) {
+            segOutput = afterCutDF;
+            charCount = c2;
+            console.warn(`⚠️ ${seg.id} API 压缩失败·保留级2: ${err.message}`);
+          }
         }
-      } catch (err) {
-        console.warn(`⚠️ ${seg.id} 压缩 API 调用失败·保留原输出: ${err.message}`);
       }
     } else {
-      console.log(`✓ ${seg.id} 字数 ${charCount}，合格`);
+      console.log(`✓ ${seg.id} 字数 ${charCount}·合格`);
     }
     // 时长验证
+    // 三档逻辑：
+    //   1. actualTotal > 15.5s         → 铁律红线·必须警告
+    //   2. actualTotal < plannedTotal  → 合理情况·末尾片段常有余震/收尾留白·不警告
+    //   3. actualTotal > plannedTotal 且差 >2s 但 ≤15s → 轻微超时·提示即可
     const SHOT_DUR_RE = /镜\d+\s+(\d+(?:\.\d+)?)\s*s/g;
     const actualTotal = Array.from(segOutput.matchAll(SHOT_DUR_RE), m => parseFloat(m[1]))
       .reduce((sum, d) => sum + d, 0);
     const plannedTotal = (seg.shots || []).reduce((s, sh) => s + (sh.duration || 0), 0);
     if (actualTotal > 0 && actualTotal > 15.5) {
       console.warn(`⚠️ ${seg.id} 实际总时长 ${actualTotal}s 超过15秒铁律上限`);
-    } else if (actualTotal > 0 && Math.abs(actualTotal - plannedTotal) > 2) {
-      console.warn(`⚠️ ${seg.id} 实际总时长 ${actualTotal}s ≠ 规划 ${plannedTotal}s（差${Math.abs(actualTotal - plannedTotal).toFixed(1)}s）`);
+    } else if (actualTotal > 0 && actualTotal > plannedTotal + 2) {
+      // 只警告"实际比规划长"的情况·"短于规划"视为正常（末尾收尾/余震）
+      console.warn(`⚠️ ${seg.id} 实际总时长 ${actualTotal}s 超过规划 ${plannedTotal}s（超${(actualTotal - plannedTotal).toFixed(1)}s）`);
     } else if (actualTotal > 0) {
       console.log(`✓ ${seg.id} 时长 ${actualTotal}s，合格`);
     }
@@ -1573,9 +1716,33 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
   // 并行写所有片段（全部带参考A部分）
   setSceneProgress(job, sceneIndex, scene.id, 'processing', `并行写作 ${plan.segments.length} 个片段...`, 2);
 
+  // ── 片段级自动重试：DeepSeek 在高峰期偶发 600s 超时·重试 2 次兜底 ──
+  // 只对 timeout/network 类错误重试·内容类错误（JSON 解析失败等）不重试避免死循环
+  async function writeWithRetry(seg, si, refA) {
+    const MAX_RETRIES = 2;
+    let lastErr = null;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        return await writeAndVerifySegment(seg, si, refA);
+      } catch (err) {
+        lastErr = err;
+        const msg = err.message || '';
+        const isRetryable = /timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|network|fetch failed|socket hang up|600-second/i.test(msg);
+        if (!isRetryable || attempt === MAX_RETRIES) {
+          console.error(`❌ ${seg.id} 写作失败（尝试 ${attempt + 1}/${MAX_RETRIES + 1}）: ${msg}`);
+          throw err;
+        }
+        const waitMs = 2000 * (attempt + 1); // 2s, 4s
+        console.warn(`⚠️ ${seg.id} 网络/超时失败（尝试 ${attempt + 1}/${MAX_RETRIES + 1}），${waitMs / 1000}s 后重试: ${msg.slice(0, 80)}`);
+        await new Promise(r => setTimeout(r, waitMs));
+      }
+    }
+    throw lastErr;
+  }
+
   const segmentPromises = plan.segments.map((seg, si) =>
-    writeAndVerifySegment(seg, si, referenceA).catch(err => {
-      console.error(`❌ ${seg.id} 写作失败: ${err.message}`);
+    writeWithRetry(seg, si, referenceA).catch(err => {
+      console.error(`❌ ${seg.id} 最终失败: ${err.message}`);
       return `[${seg.id} 生成失败: ${err.message}]`;
     })
   );
@@ -1594,22 +1761,81 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
   if (dialogues.length > 0) {
     const finalMissing = verifyDialogues(dialogues, outputs.join('\n'));
     if (finalMissing.length > 0) {
-      console.warn(`⚠️ ${scene.id} 全场景台词总检：${finalMissing.length} 条台词遗漏，尝试补写到最后一个片段...`);
+      console.warn(`⚠️ ${scene.id} 全场景台词总检：${finalMissing.length} 条台词遗漏，智能定位补写...`);
       finalMissing.forEach((d, i) => console.warn(`   遗漏${i + 1}：${d.slice(0, 40)}...`));
-      // 补写到最后一个片段
-      const lastIdx = outputs.length - 1;
-      if (lastIdx >= 0 && !outputs[lastIdx].startsWith('[')) {
-        try {
-          outputs[lastIdx] = await repairMissingDialogues(finalMissing, outputs[lastIdx], systemPrompt, config);
-          console.log(`✓ ${scene.id} 全场景台词补写完成`);
-          // 再验一次
-          const finalMissing2 = verifyDialogues(dialogues, outputs.join('\n'));
-          if (finalMissing2.length > 0) {
-            console.warn(`⚠️ ${scene.id} 补写后仍有 ${finalMissing2.length} 条遗漏`);
+
+      // ─── 智能定位：根据台词在剧本中的位置·找到它应该落在哪个片段 ───
+      // 方法：用每条遗漏台词前一条已分配台词的所在片段作为目标
+      // 如果都找不到·再退回到"最后一个片段"
+      for (const missingDlg of finalMissing) {
+        const mIdx = dialogues.indexOf(missingDlg);
+        if (mIdx < 0) continue;
+
+        // 向前找最近一条"已分配"的台词·它在哪个片段
+        let targetSegIdx = -1;
+        for (let i = mIdx - 1; i >= 0; i--) {
+          const prevD = dialogues[i];
+          // 在所有片段输出里找这条台词的位置
+          for (let segIdx = 0; segIdx < outputs.length; segIdx++) {
+            if (outputs[segIdx].startsWith('[')) continue; // 跳过失败片段
+            if (verifyDialogues([prevD], outputs[segIdx]).length === 0) {
+              targetSegIdx = segIdx;
+              break;
+            }
           }
-        } catch (err) {
-          console.warn(`⚠️ ${scene.id} 全场景台词补写失败：${err.message}`);
+          if (targetSegIdx >= 0) break;
         }
+
+        // 向前找不到·向后找
+        if (targetSegIdx < 0) {
+          for (let i = mIdx + 1; i < dialogues.length; i++) {
+            const nextD = dialogues[i];
+            for (let segIdx = 0; segIdx < outputs.length; segIdx++) {
+              if (outputs[segIdx].startsWith('[')) continue;
+              if (verifyDialogues([nextD], outputs[segIdx]).length === 0) {
+                targetSegIdx = segIdx;
+                break;
+              }
+            }
+            if (targetSegIdx >= 0) break;
+          }
+        }
+
+        // 都找不到·退回最后一个片段
+        if (targetSegIdx < 0) {
+          targetSegIdx = outputs.length - 1;
+          while (targetSegIdx >= 0 && outputs[targetSegIdx].startsWith('[')) targetSegIdx--;
+        }
+
+        if (targetSegIdx < 0) {
+          console.warn(`⚠️ 台词 "${missingDlg.slice(0, 20)}..." 无法定位·跳过补写`);
+          continue;
+        }
+
+        console.log(`   📍 台词 "${missingDlg.slice(0, 25)}..." 定位到片段 ${targetSegIdx + 1}/${outputs.length}`);
+        try {
+          outputs[targetSegIdx] = await repairMissingDialogues([missingDlg], outputs[targetSegIdx], systemPrompt, config);
+        } catch (err) {
+          console.warn(`⚠️ 台词补写失败：${err.message}`);
+        }
+      }
+
+      // 整体再验一次
+      const finalMissing2 = verifyDialogues(dialogues, outputs.join('\n'));
+      if (finalMissing2.length > 0) {
+        console.warn(`⚠️ ${scene.id} 智能补写后仍有 ${finalMissing2.length} 条遗漏·最后兜底到末尾片段`);
+        // 最后的最后·还漏的再全塞到末尾
+        const lastIdx = outputs.findIndex((o, i) => !o.startsWith('[') && i === outputs.length - 1);
+        const fallbackIdx = lastIdx >= 0 ? lastIdx : outputs.length - 1;
+        if (fallbackIdx >= 0 && !outputs[fallbackIdx].startsWith('[')) {
+          try {
+            outputs[fallbackIdx] = await repairMissingDialogues(finalMissing2, outputs[fallbackIdx], systemPrompt, config);
+          } catch (err) {
+            console.warn(`⚠️ 兜底补写失败：${err.message}`);
+          }
+        }
+      } else {
+        console.log(`✓ ${scene.id} 智能补写完成·${dialogues.length} 条台词全部落实`);
       }
     } else {
       console.log(`✓ ${scene.id} 全场景台词总检通过，${dialogues.length} 条台词全部落实`);
@@ -1816,7 +2042,7 @@ app.post('/api/process', async (req, res) => {
 
   res.json({ jobId });
 
-  const CONCURRENCY = 4; // DeepSeek 不限流，并发 4 在非高峰时段接近线性提速；高峰期靠内置 429 退避兜底
+  const CONCURRENCY = 6; // DeepSeek 不限流，并发 4 在非高峰时段接近线性提速；高峰期靠内置 429 退避兜底
   const job = jobs.get(jobId);
   let index = 0;
 
@@ -1910,11 +2136,16 @@ app.get('/api/download-prompts/:jobId', (req, res) => {
 });
 
 app.post('/api/reload-prompts', (req, res) => {
-  // 清空提示词缓存，下次调用 loadPrompt 时重新读磁盘
   for (const key of Object.keys(_promptCache)) delete _promptCache[key];
-  // 同步清空规划阶段专用缓存（loadCoreForPlan 截取自 core.txt，core.txt 改动后必须一起重置）
   delete _planCoreCache.content;
-  res.json({ message: '提示词缓存已清空，下次处理时重新读取', prompts: ['core.txt', 'wenxi.txt', 'wuxi.txt', 'agent_a.md', 'agent_a_director.md'] });
+  res.json({
+    message: '提示词缓存已清空，下次处理时重新读取',
+    prompts: [
+      'core_v7.txt', 'wenxi_core_v7.txt', 'wenxi_examples_v7.txt', 'wuxi_v7.txt',
+      'agent_a_v7.md', 'agent_a_director_v7.md',
+      'core.txt', 'wenxi.txt', 'wuxi.txt', 'agent_a.md', 'agent_a_director.md'
+    ]
+  });
 });
 
 
@@ -2568,112 +2799,27 @@ app.post('/api/agent-a/annotate', async (req, res) => {
   });
   res.json({ jobId, sceneCount: scenes.length });
 
-  if (isDirectorMode) {
-    // ── 导演讲戏模式：按确认后的映射逐场景批注 ──
-    const { byScene, globals } = groupMappedSegments(mappedSegments);
-    (async () => {
-      const job = agentAJobs.get(jobId);
-      const directorPrompt = loadPrompt('agent_a_director.md');
-      if (!directorPrompt) {
-        job.status = 'error'; job.finishedAt = Date.now();
-        console.error('❌ 导演讲戏提示词文件 agent_a_director.md 未找到');
-        return;
-      }
-      const CONCURRENCY = 4;
-      let index = 0;
-      // sceneFeels[i] 在场景 i 完成后才写入；读取时用当时的最新值
-      // 并发下 prevFeel 可能为 null（上一场还未完成），属正常降级，不影响批注正确性
-      const sceneFeels = new Array(scenes.length).fill(null);
+  // 导演模式时·预分组讲戏
+  const { byScene: segsByScene, globals: globalSegs } = isDirectorMode
+    ? groupMappedSegments(mappedSegments)
+    : { byScene: {}, globals: [] };
 
-      console.log('\n🎬 Agent A 导演讲戏批注：' + scenes.length + '个场景（映射已确认）');
-      const coveredScenes = Object.keys(byScene);
-      console.log('   有讲戏覆盖的场景：' + coveredScenes.join(', '));
-      console.log('   全局指令：' + globals.length + '条');
-
-      async function runNext() {
-        if (index >= scenes.length) return;
-        const i = index++;
-        const scene = scenes[i];
-        const sceneSegs = byScene[scene.id] || [];
-
-        try {
-          const segCount = sceneSegs.length;
-          job.progress[i] = { sceneId: scene.id, status: 'processing',
-            message: segCount > 0 ? '批注中（' + segCount + '条讲戏）...' : '标注待补充...' };
-
-          // 在实际构建 prompt 时才读取上一场情绪，最大化利用并发已完成的结果
-          const prevFeel = i > 0 ? sceneFeels[i - 1] : null;
-          const execPrompt = buildDirectorAnnotatePrompt(scene, scenes, sceneSegs, globals, prevFeel);
-          let result = stripMarkdown(await callAPI(directorPrompt, execPrompt, config));
-
-          // 验证
-          const errors = validateDirectorAnnotation(scene.content, result);
-          if (errors.length > 0) {
-            console.log('⚠️ 场景' + scene.id + ' 验证问题' + errors.length + '条，重试...');
-            job.progress[i].message = '验证失败(' + errors.length + '条)，重试...';
-            const retryPrompt = execPrompt + '\n\n⚠️ 上次批注有以下问题，请修正后重新完整输出：\n' + errors.map(e => '- ' + e).join('\n');
-            result = stripMarkdown(await callAPI(directorPrompt, retryPrompt, config));
-            const errors2 = validateDirectorAnnotation(scene.content, result);
-            if (errors2.length > 0) {
-              console.warn('⚠️ 场景' + scene.id + ' 重试后仍有' + errors2.length + '条问题');
-              job.progress[i] = { sceneId: scene.id, status: 'done', message: '完成（' + errors2.length + '条警告）' };
-            } else {
-              job.progress[i] = { sceneId: scene.id, status: 'done', message: '完成 ✓' };
-            }
-          } else {
-            console.log('✓ 场景' + scene.id + ' 批注通过');
-            job.progress[i] = { sceneId: scene.id, status: 'done', message: '完成 ✓' };
-          }
-
-          const feelMatch = result.match(/【场景感受】\s*([^\n]+)/);
-          if (feelMatch) sceneFeels[i] = feelMatch[1].trim();
-
-          // 角色名修正：导演口误的名字替换为剧本里的正确写法
-          result = normalizeCharNames(result, scene.characters);
-
-          job.results[i] = result;
-          job.validations[i] = { sceneId: scene.id, stats: getDirectorAnnotationStats(scene.content, result) };
-        } catch (err) {
-          console.error('❌ 场景' + scene.id + ' 失败:', err.message);
-          job.progress[i] = { sceneId: scene.id, status: 'error', message: '失败: ' + err.message };
-          job.results[i] = '[场景' + scene.id + ' 批注失败: ' + err.message + ']';
-        }
-        job.completed++;
-        await runNext();
-      }
-
-      const workers = Array(Math.min(CONCURRENCY, scenes.length)).fill(null).map(() => runNext());
-      await Promise.all(workers).catch(console.error);
-
-      const allAnnotations = job.results.filter(Boolean).join('\n\n');
-      try {
-        job.progress.push({ sceneId: '摘要', status: 'processing', message: '生成批注摘要...' });
-        const sumMsg = '以下是已完成的逐场景批注（导演讲戏映射模式）。请输出批注摘要。\n⚠️ 纯文本，禁止 Markdown。\n\n'
-          + '摘要格式：\n【批注摘要】\n已批注场景：X场\n场景感受覆盖：X场/共X场\n镜头意图批注：X条\n人物内心批注：X条\n禁止项：X条\n待补充场景：X场\n\n'
-          + '═══ 全部批注 ═══\n' + allAnnotations;
-        const summary = stripMarkdown(await callAPI(directorPrompt, sumMsg, config));
-        job.finalResult = allAnnotations + '\n\n' + summary;
-        job.progress[job.progress.length - 1] = { sceneId: '摘要', status: 'done', message: '完成 ✓' };
-      } catch (err) {
-        job.finalResult = allAnnotations + '\n\n[摘要失败: ' + err.message + ']';
-        job.progress[job.progress.length - 1] = { sceneId: '摘要', status: 'error', message: '摘要失败' };
-      }
-      job.status = 'done'; job.finishedAt = Date.now();
-      console.log('✓ Agent A 导演讲戏模式全部完成：' + scenes.length + '个场景');
-    })();
-  } else {
-  // ── AI自动分析模式（原有逻辑）──
   (async () => {
     const job = agentAJobs.get(jobId);
-    const agentAPrompt = loadPrompt('agent_a.md');
-    const planSystemPrompt = '你是专业的剧本批注规划专员。只做规划分析，不写批注正文。';
-    const CONCURRENCY = 4;
-    let index = 0;
-    // sceneFeels[i] 在场景 i 完成后才写入；读取时用当时的最新值
-    // 并发下 prevFeel 可能为 null（上一场还未完成），属正常降级，不影响批注正确性
-    const sceneFeels = new Array(scenes.length).fill(null);
+    const systemPromptPath = isDirectorMode ? 'agent_a_director_v7.md' : 'agent_a_v7.md';
+    const systemPrompt = loadPrompt(systemPromptPath);
+    if (!systemPrompt) {
+      job.status = 'error'; job.finishedAt = Date.now();
+      console.error(`❌ 提示词文件 ${systemPromptPath} 未找到`);
+      return;
+    }
 
-    console.log('\n📝 Agent A v6 逐场景批注：' + scenes.length + '个场景（规划→验证→执行→验证）');
+    const CONCURRENCY = 6;
+    let index = 0;
+    const sceneFeels = new Array(scenes.length).fill(null);
+    const sceneDataList = new Array(scenes.length).fill(null);
+
+    console.log(`\n🎬 Agent A v7 启动（${isDirectorMode ? '导演讲戏' : 'AI 分析'}模式）·${scenes.length} 个场景·并发 ${CONCURRENCY}`);
 
     async function runNext() {
       if (index >= scenes.length) return;
@@ -2681,88 +2827,86 @@ app.post('/api/agent-a/annotate', async (req, res) => {
       const scene = scenes[i];
 
       try {
-        // ── 第一步：规划 ──
-        job.progress[i] = { sceneId: scene.id, status: 'processing', message: '规划中...' };
-        // 在实际构建 prompt 时才读取上一场情绪，最大化利用并发已完成的结果
+        job.progress[i] = { sceneId: scene.id, status: 'processing', message: '批注中...' };
+
+        // 第一步：解析 items
+        const items = annotationV7.parseSceneItemsV7(scene.content);
+
+        // 第二步：构建 prompt
         const prevFeel = i > 0 ? sceneFeels[i - 1] : null;
-        const planPrompt = buildAnnotationPlanPrompt(scene, scenes, soulCard, prevFeel);
-        const planText = await callAPI(planSystemPrompt, planPrompt, config);
-        let plan = parseAnnotationPlan(planText);
-
-        if (!plan) {
-          console.log('⚠️ 场景' + scene.id + ' 规划JSON解析失败，重试...');
-          job.progress[i].message = '规划解析失败，重试...';
-          const planText2 = await callAPI(planSystemPrompt, planPrompt + '\n\n⚠️ 上次输出的JSON格式有误，请严格输出合法JSON。', config);
-          plan = parseAnnotationPlan(planText2);
-        }
-
-        if (plan) {
-          const planErrors = validateAnnotationPlan(plan, scene.content);
-          if (planErrors.length > 0) {
-            console.log('⚠️ 场景' + scene.id + ' 规划验证失败：' + planErrors.join(', '));
-            job.progress[i].message = '规划验证失败，修正...';
-            const fixPrompt = planPrompt + '\n\n⚠️ 上次规划有以下错误，请修正后重新输出JSON：\n' + planErrors.map(e => '- ' + e).join('\n');
-            const planText3 = await callAPI(planSystemPrompt, fixPrompt, config);
-            const plan2 = parseAnnotationPlan(planText3);
-            if (plan2) {
-              const planErrors2 = validateAnnotationPlan(plan2, scene.content);
-              if (planErrors2.length === 0) { plan = plan2; console.log('✓ 场景' + scene.id + ' 规划修正通过'); }
-              else { console.warn('⚠️ 场景' + scene.id + ' 规划修正后仍有问题，用修正版继续'); plan = plan2; }
+        const options = isDirectorMode
+          ? {
+              sceneSegments: segsByScene[scene.id] || [],
+              globalSegments: globalSegs,
+              prevFeel,
             }
-          } else {
-            console.log('✓ 场景' + scene.id + ' 规划验证通过');
-          }
-          // 保存场景感受供后续场景衔接
-          sceneFeels[i] = plan.scene_feel || '';
-        } else {
-          console.warn('⚠️ 场景' + scene.id + ' 规划彻底失败，降级为无规划执行');
-          sceneFeels[i] = '';
-        }
+          : {
+              soulCard,
+              prevFeel,
+            };
+        const userPrompt = annotationV7.buildAnnotationPromptV7(scene, items, isDirectorMode ? 'director' : 'ai', options);
 
-        // ── 第二步：执行批注 ──
-        job.progress[i].message = '批注中...';
-        let execPrompt;
-        if (plan) {
-          execPrompt = buildAnnotationExecutePrompt(scene, plan, scenes, soulCard, prevFeel);
-        } else {
-          // 降级：无规划直接批注
-          let msg = '请按照第二步执行：只批注场景' + scene.id + '。\n⚠️ 纯文本，禁止 Markdown。台词和▲动作行原样保留。\n\n';
-          if (prevFeel) msg += '上一场情绪落点：' + prevFeel + '\n\n';
-          msg += '═══ 剧魂定位卡 ═══\n' + soulCard + '\n\n═══ 场景' + scene.id + ' ═══\n' + scene.content + '\n\n请输出完整批注。';
-          execPrompt = msg;
-        }
+        // 第三步：调用 API（启用 JSON mode）
+        const jsonConfig = Object.assign({}, config, { jsonMode: true });
+        let jsonText = await callAPI(systemPrompt, userPrompt, jsonConfig);
+        let data = annotationV7.parseAnnotationJSON(jsonText);
 
-        let result = stripMarkdown(await callAPI(agentAPrompt, execPrompt, config));
+        // 第四步：验证·必要时重试一次
+        const sceneSegs = segsByScene[scene.id] || [];
+        let errors = data ? annotationV7.validateAnnotationV7(data, items, sceneSegs) : ['JSON 解析失败'];
 
-        // ── 第三步：执行后验证 ──
-        const errors = validateAnnotation(scene.content, result);
         if (errors.length > 0) {
-          console.log('⚠️ 场景' + scene.id + ' 验证问题' + errors.length + '条，重试...');
-          job.progress[i].message = '验证失败(' + errors.length + '条)，重试...';
-          const retryPrompt = execPrompt + '\n\n⚠️ 上次批注有以下问题，请修正后重新完整输出：\n' + errors.map(e => '- ' + e).join('\n');
-          result = stripMarkdown(await callAPI(agentAPrompt, retryPrompt, config));
-          const errors2 = validateAnnotation(scene.content, result);
-          if (errors2.length > 0) {
-            console.warn('⚠️ 场景' + scene.id + ' 重试后仍有' + errors2.length + '条问题');
-            job.progress[i] = { sceneId: scene.id, status: 'done', message: '完成（' + errors2.length + '条警告）' };
-          } else {
-            console.log('✓ 场景' + scene.id + ' 重试后通过');
-            job.progress[i] = { sceneId: scene.id, status: 'done', message: '完成 ✓' };
+          console.log(`⚠️ 场景${scene.id} 第一次验证 ${errors.length} 条问题·重试...`);
+          job.progress[i].message = `验证失败(${errors.length}条)·重试...`;
+          const retryPrompt = userPrompt + `\n\n⚠️ 上次 JSON 有以下问题·请修正后重新输出：\n` + errors.map(e => `- ${e}`).join('\n');
+          jsonText = await callAPI(systemPrompt, retryPrompt, jsonConfig);
+          const data2 = annotationV7.parseAnnotationJSON(jsonText);
+          if (data2) {
+            const errors2 = annotationV7.validateAnnotationV7(data2, items, sceneSegs);
+            if (errors2.length === 0) {
+              data = data2;
+              errors = [];
+              console.log(`✓ 场景${scene.id} 重试后通过`);
+            } else {
+              data = data2; // 用重试版·但打警告
+              errors = errors2;
+              console.warn(`⚠️ 场景${scene.id} 重试后仍 ${errors2.length} 条警告·继续`);
+            }
           }
         } else {
-          console.log('✓ 场景' + scene.id + ' 验证通过');
-          job.progress[i] = { sceneId: scene.id, status: 'done', message: '完成 ✓' };
+          console.log(`✓ 场景${scene.id} 首次验证通过`);
         }
-        // 更新场景感受（从实际批注中提取，更准确）
-        const feelMatch = result.match(/【场景感受】\s*([^\n]+)/);
-        if (feelMatch) sceneFeels[i] = feelMatch[1].trim();
 
-        job.results[i] = result;
-        job.validations[i] = { sceneId: scene.id, stats: getAnnotationStats(scene.content, result) };
+        if (!data) {
+          throw new Error('JSON 解析两次均失败');
+        }
+
+        // 第五步：代码组装批注版剧本
+        let annotatedText = annotationV7.assembleAnnotationV7(scene, items, data);
+
+        // 第六步：角色名修正（导演模式的口误修正）
+        if (isDirectorMode && scene.characters?.length) {
+          annotatedText = normalizeCharNames(annotatedText, scene.characters);
+        }
+
+        // 第七步：保存结果
+        sceneFeels[i] = data.scene_feel || '';
+        sceneDataList[i] = data;
+        job.results[i] = annotatedText;
+        job.validations[i] = {
+          sceneId: scene.id,
+          stats: annotationV7.getAnnotationStatsV7(items, data),
+          errors: errors || [],
+        };
+        job.progress[i] = {
+          sceneId: scene.id,
+          status: 'done',
+          message: errors.length > 0 ? `完成（${errors.length}条警告）` : '完成 ✓',
+        };
       } catch (err) {
-        console.error('❌ 场景' + scene.id + ' 失败:', err.message);
+        console.error(`❌ 场景${scene.id} 失败:`, err.message);
         job.progress[i] = { sceneId: scene.id, status: 'error', message: '失败: ' + err.message };
-        job.results[i] = '[场景' + scene.id + ' 批注失败: ' + err.message + ']';
+        job.results[i] = `[场景${scene.id} 批注失败: ${err.message}]`;
       }
       job.completed++;
       await runNext();
@@ -2771,23 +2915,20 @@ app.post('/api/agent-a/annotate', async (req, res) => {
     const workers = Array(Math.min(CONCURRENCY, scenes.length)).fill(null).map(() => runNext());
     await Promise.all(workers).catch(console.error);
 
-    const allAnnotations = job.results.filter(Boolean).join('\n\n');
+    // 代码生成摘要（不走 API）
+    const allAnnotations = job.results.filter(r => r && !r.startsWith('[')).join('\n\n');
     try {
-      job.progress.push({ sceneId: '摘要', status: 'processing', message: '生成批注摘要...' });
-      const sumMsg = '以下是已完成的逐场景批注。请执行第三步逐行核查和第四步批注摘要。\n⚠️ 纯文本，禁止 Markdown。\n\n═══ 剧魂定位卡 ═══\n' + soulCard + '\n\n═══ 全部批注 ═══\n' + allAnnotations + '\n\n请输出核查结果和批注摘要。';
-      const summary = stripMarkdown(await callAPI(agentAPrompt, sumMsg, config));
+      const summary = annotationV7.generateSummaryV7(scenes, job.results, sceneDataList, job.validations);
       job.finalResult = allAnnotations + '\n\n' + summary;
-      job.progress[job.progress.length - 1] = { sceneId: '摘要', status: 'done', message: '完成 ✓' };
     } catch (err) {
-      job.finalResult = allAnnotations + '\n\n[摘要失败: ' + err.message + ']';
-      job.progress[job.progress.length - 1] = { sceneId: '摘要', status: 'error', message: '摘要失败' };
+      job.finalResult = allAnnotations + `\n\n[摘要生成失败: ${err.message}]`;
     }
-    job.status = 'done'; job.finishedAt = Date.now();
-    console.log('✓ Agent A v6 全部完成：' + scenes.length + '个场景');
-  })();
-  } // end else AI mode
-});
 
+    job.status = 'done';
+    job.finishedAt = Date.now();
+    console.log(`✓ Agent A v7 完成·${scenes.length} 个场景`);
+  })();
+});
 app.get('/api/agent-a/progress/:jobId', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -2843,10 +2984,10 @@ if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
 if (!fs.existsSync('prompts')) fs.mkdirSync('prompts');
 
 app.listen(PORT, () => {
-  console.log('\n🎬 视频提示词工具 v6 已启动');
+  console.log('\n🎬 视频提示词工具 v7 已启动');
   console.log('📍 访问地址：http://localhost:' + PORT);
   console.log('📁 提示词目录：' + path.join(__dirname, 'prompts'));
-  console.log('   Agent A v6：规划→验证→执行→验证（与Agent C同级）');
-  console.log('   Agent A 导演讲戏模式：直接映射（无规划步骤）');
-  console.log('   Agent C：批注剧本 → 规划 → 逐片段写作（多步）\n');
+  console.log('   Agent A v7：JSON 引擎·LLM 只产批注·代码拼装原文');
+  console.log('   Agent C v7：字数 Cascade·范例按需注入·DeepSeek JSON mode');
+  console.log('   并发：6·缓存命中会在日志打印\n');
 });
