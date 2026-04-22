@@ -2029,9 +2029,10 @@ app.post('/api/reload-prompts', (req, res) => {
   res.json({
     message: '提示词缓存已清空，下次处理时重新读取',
     prompts: [
-      'core_v7.txt', 'wenxi_core_v7.txt', 'wenxi_examples_v7.txt', 'wuxi_v7.txt',
-      'agent_a_v7.md', 'agent_a_director_v7.md',
-      'core.txt', 'wenxi.txt', 'wuxi.txt', 'agent_a.md', 'agent_a_director.md'
+      'core.txt', 'wenxi.txt', 'wuxi.txt',
+      'agent_a.md', 'agent_a_director.md',
+      'agent_b.md',
+      'A无导版本前面ins.txt', 'A有导版本前面ins.txt', 'C-core版本前面ins.txt'
     ]
   });
 });
@@ -2694,7 +2695,7 @@ app.post('/api/agent-a/annotate', async (req, res) => {
 
   (async () => {
     const job = agentAJobs.get(jobId);
-    const systemPromptPath = isDirectorMode ? 'agent_a_director_v7.md' : 'agent_a_v7.md';
+    const systemPromptPath = isDirectorMode ? 'agent_a_director.md' : 'agent_a.md';
     const systemPrompt = loadPrompt(systemPromptPath);
     if (!systemPrompt) {
       job.status = 'error'; job.finishedAt = Date.now();
