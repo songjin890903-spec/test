@@ -270,34 +270,34 @@ function verifyDialogues(dialogues, output) {
     if (!contentPart) continue;
 
     // ── 多锚点检查（防吞句）──────────────────────────────────
-    // 只检前15字会导致"头部出现就通过，中间子句被吞"
-    // 按句末标点拆子句，每句取前10字做锚点，任一缺失=整条台词遗漏
-    const clauses = contentPart.split(/(?<=[？！。])/g)
-      .map(s => s.trim()).filter(s => s.length >= 4);
+    // 台词很短（≤8字）时直接用前字锚点，不做 split 开销
     let isMissing;
-    if (clauses.length > 1) {
-      isMissing = clauses.some(c => {
-        const anchor = normalizeDialogueForMatch(c.slice(0, 10));
-        return anchor && !cleanOutputNorm.includes(anchor);
-      });
+    if (contentPart.length <= 8) {
+      const anchor = normalizeDialogueForMatch(contentPart.slice(0, 6));
+      isMissing = !!(anchor && !cleanOutputNorm.includes(anchor));
     } else {
-      // 单句：进一步用逗号拆分细粒度子锚点
-      // 原因：LLM 可能把一整句拆到两个镜号·中间插入"XXX继续说："等过渡文本
-      // 使 ——\n 归一化无效。细拆后至少各逗号段能独立匹配。
-      // 每段取 length>=2（短至"瑶妹"也保留·以便检测子段是否丢失）
-      const subClauses = contentPart.split(/[，,、]/g)
-        .map(s => s.trim()).filter(s => s.length >= 2);
-      if (subClauses.length > 1) {
-        isMissing = subClauses.some(c => {
-          // 每段取前 6 字做锚点（短段可能只有 2-3 字·slice 会自动裁剪）
-          const anchor = normalizeDialogueForMatch(c.slice(0, 6));
-          // 锚点至少要 2 字才有判别意义·更短直接跳过
-          return anchor.length >= 2 && !cleanOutputNorm.includes(anchor);
+      // 按句末标点拆子句，每句取前10字做锚点，任一缺失=整条台词遗漏
+      const clauses = contentPart.split(/(?<=[？！。])/g)
+        .map(s => s.trim()).filter(s => s.length >= 4);
+      if (clauses.length > 1) {
+        isMissing = clauses.some(c => {
+          const anchor = normalizeDialogueForMatch(c.slice(0, 10));
+          return anchor && !cleanOutputNorm.includes(anchor);
         });
       } else {
-        // 真·短句：用前10字（归一化后）做锚点
-        const coreText = normalizeDialogueForMatch(contentPart.slice(0, 10));
-        isMissing = !!(coreText && !cleanOutputNorm.includes(coreText));
+        // 单句：进一步用逗号拆分细粒度子锚点
+        const subClauses = contentPart.split(/[，,、]/g)
+          .map(s => s.trim()).filter(s => s.length >= 2);
+        if (subClauses.length > 1) {
+          isMissing = subClauses.some(c => {
+            const anchor = normalizeDialogueForMatch(c.slice(0, 6));
+            return anchor.length >= 2 && !cleanOutputNorm.includes(anchor);
+          });
+        } else {
+          // 真·短句：用前10字归一化后做锚点
+          const coreText = normalizeDialogueForMatch(contentPart.slice(0, 10));
+          isMissing = !!(coreText && !cleanOutputNorm.includes(coreText));
+        }
       }
     }
     if (isMissing) missing.push(d);
@@ -506,17 +506,17 @@ function parseScript(text) {
 // ============================================================
 // API 调用（支持续跑）
 // ============================================================
+// 统一超时：每次 fetch 新建 AbortController，不复用（retry 时 signal 可能已死）
+const TIMEOUT_MS = 5 * 60 * 1000; // 5分钟，防止永久挂起
+
 async function callAPI(systemPrompt, userMessage, config) {
   const { apiKey, apiType, apiUrl, model } = config;
-  const controller = new AbortController();
-  const TIMEOUT_MS = 5 * 60 * 1000; // 5分钟超时，防止永久挂起
-  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
-  let fullText = '';
-  let continueLoop = true;
-  let messages = [{ role: 'user', content: userMessage }];
   const MAX_RETRIES = 3;
-  const MAX_CONTINUATIONS = 5; // 续跑上限，防止死循环
-  const RETRY_DELAYS = [5000, 15000, 30000]; // 5s / 15s / 30s
+  const RETRY_DELAYS = [5000, 15000, 30000]; // 重试等待
+  const MAX_CONTINUATIONS = 5; // 续跑上限
+
+  let fullText = '';
+  let messages = [{ role: 'user', content: userMessage }];
   let retries = 0;
   let continuations = 0;
 
@@ -1344,7 +1344,7 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
   const planSystemPrompt = loadCoreForPlan(); // ✨ 规划阶段精简加载·比完整 core 少 80% 字符
 
   // ── 第一步：规划 ─────────────────────────────────────────
-  setSceneProgress(job, sceneIndex, scene.id, 'processing', '规划中...', 0);
+  setSceneProgress(job, sceneIndex, scene.id, 'processing', '规划中...（最长5分钟，超时自动报错）', 0);
 
   let plan = null;
   const directorShots = extractDirectorShots(scene.content);
@@ -1481,7 +1481,7 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
   if (!referenceA) {
     // 创建一个 promise，首片段写完后 resolve
     referenceAPromise = new Promise(resolve => { referenceAResolve = resolve; });
-    setSceneProgress(job, sceneIndex, scene.id, 'processing', '并行写作（首片段同步生成A参数）...', 1);
+    setSceneProgress(job, sceneIndex, scene.id, 'processing', '并行写作中...（最长5分钟，超时自动报错）', 1);
   }
 
   // 单片段写作+验证的通用流程
@@ -1757,7 +1757,7 @@ const effectiveSystemPrompt = (seg.sceneType && seg.sceneType !== scene.sceneTyp
 // 降级方案：单次生成（规划彻底失败时使用）
 async function processSceneSingleShot(scene, costumeCard, config, job, sceneIndex, systemPrompt, dialogues) {
   job.progress[sceneIndex] = {
-    sceneId: scene.id, status: 'processing', message: '生成中（单次模式）...'
+    sceneId: scene.id, status: 'processing', message: '生成中（单次模式，最长5分钟）...'
   };
 
   let userMsg = `请为以下场景生成完整的视频提示词。\n\n`;
@@ -1892,6 +1892,23 @@ async function processSceneSingleShot(scene, costumeCard, config, job, sceneInde
 // ============================================================
 // 路由
 // ============================================================
+
+// Railway 健康检查端点（/ → 区分活跃/空闲，Railway 10s 超时）
+app.get('/', (req, res) => {
+  const activeJobs = jobs.size + agentAJobs.size;
+  const activeList = [];
+  for (const [id, job] of jobs) {
+    if (job.status === 'running') activeList.push({ id: id.slice(0, 12), scenes: job.total });
+  }
+  console.log(`[健康检查] jobs=${jobs.size} agentA=${agentAJobs.size} 活跃=${activeJobs} ${activeList.length > 0 ? '→ ' + activeList.map(j => j.id).join(',') : '(空闲)'}`);
+  res.json({
+    status: 'ok',
+    uptime: process.uptime(),
+    activeJobs,
+    activeJobList: activeList,
+    ts: new Date().toISOString()
+  });
+});
 
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
