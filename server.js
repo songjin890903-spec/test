@@ -508,6 +508,9 @@ function parseScript(text) {
 // ============================================================
 async function callAPI(systemPrompt, userMessage, config) {
   const { apiKey, apiType, apiUrl, model } = config;
+  const controller = new AbortController();
+  const TIMEOUT_MS = 5 * 60 * 1000; // 5分钟超时，防止永久挂起
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
   let fullText = '';
   let continueLoop = true;
   let messages = [{ role: 'user', content: userMessage }];
@@ -517,7 +520,9 @@ async function callAPI(systemPrompt, userMessage, config) {
   let retries = 0;
   let continuations = 0;
 
-  while (continueLoop) {
+  try {
+    while (continueLoop) {
+      try {
     if (apiType === 'anthropic') {
       // 支持中转站：apiUrl 可填完整端点（.../v1/messages）或 base URL（自动补 /v1/messages）
       let anthropicEndpoint = 'https://api.anthropic.com/v1/messages';
@@ -538,7 +543,8 @@ async function callAPI(systemPrompt, userMessage, config) {
           max_tokens: 8192,
           system: systemPrompt,
           messages
-        })
+        }),
+        signal: controller.signal
       });
       // 429 限速：退避重试
       if (res.status === 429) {
@@ -599,7 +605,8 @@ async function callAPI(systemPrompt, userMessage, config) {
           systemInstruction: { parts: [{ text: systemPrompt }] },
           contents,
           generationConfig: { maxOutputTokens: 8192 }
-        })
+        }),
+        signal: controller.signal
       });
       // 429 限速：退避重试
       if (res.status === 429) {
@@ -654,7 +661,8 @@ const bodyObj = {
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify(bodyObj)
+        body: JSON.stringify(bodyObj),
+        signal: controller.signal
       });
 
       // 429 限速：退避重试
@@ -695,7 +703,18 @@ if (data.usage?.prompt_cache_hit_tokens) {
       } else {
         continueLoop = false;
       }
+      } catch (fetchErr) {
+        // 网络层错误（超时/DNS/连接拒绝等）→ 抛给外层
+        throw fetchErr;
+      }
     }
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error(`API 请求超时（${TIMEOUT_MS / 1000}秒无响应），请检查网络或尝试换用更快的 API 节点`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
   }
   return fullText;
 }
