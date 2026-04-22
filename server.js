@@ -523,188 +523,174 @@ async function callAPI(systemPrompt, userMessage, config) {
   try {
     while (continueLoop) {
       try {
-    if (apiType === 'anthropic') {
-      // 支持中转站：apiUrl 可填完整端点（.../v1/messages）或 base URL（自动补 /v1/messages）
-      let anthropicEndpoint = 'https://api.anthropic.com/v1/messages';
-      if (apiUrl) {
-        anthropicEndpoint = /\/v1\/messages\/?$/.test(apiUrl)
-          ? apiUrl
-          : apiUrl.replace(/\/+$/, '') + '/v1/messages';
-      }
-      const res = await fetch(anthropicEndpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model: model || 'claude-sonnet-4-6',
-          max_tokens: 8192,
-          system: systemPrompt,
-          messages
-        }),
-        signal: controller.signal
-      });
-      // 429 限速：退避重试
-      if (res.status === 429) {
-        if (retries >= MAX_RETRIES) throw new Error(`API 限速，已重试 ${MAX_RETRIES} 次`);
-        const wait = RETRY_DELAYS[retries++];
-        console.log(`⚠️ 限速 429，${wait / 1000}秒后重试（第${retries}次）...`);
-        await new Promise(r => setTimeout(r, wait));
-        continue;
-      }
-      // 非 429 HTTP 错误：直接报出状态码和响应体
-      if (!res.ok) {
-        const errBody = await res.text().catch(() => '(无响应体)');
-        throw new Error(`API HTTP ${res.status}: ${errBody.slice(0, 200)}`);
-      }
-      const data = await res.json();
-      if (data.error) throw new Error(data.error.message);
-      if (!data.content?.[0]?.text) throw new Error('API 返回了空内容（content为空或无text字段）');
-      retries = 0; // 成功响应后重置重试计数
-      const chunk = data.content[0].text;
-      fullText += chunk;
-      if (data.stop_reason === 'max_tokens') {
-        if (++continuations >= MAX_CONTINUATIONS) {
-          console.warn(`⚠️ 续跑已达${MAX_CONTINUATIONS}次上限，截断返回`);
-          continueLoop = false;
+        if (apiType === 'anthropic') {
+          let anthropicEndpoint = 'https://api.anthropic.com/v1/messages';
+          if (apiUrl) {
+            anthropicEndpoint = /\/v1\/messages\/?$/.test(apiUrl)
+              ? apiUrl
+              : apiUrl.replace(/\/+$/, '') + '/v1/messages';
+          }
+          const res = await fetch(anthropicEndpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': apiKey,
+              'anthropic-version': '2023-06-01'
+            },
+            body: JSON.stringify({
+              model: model || 'claude-sonnet-4-6',
+              max_tokens: 8192,
+              system: systemPrompt,
+              messages
+            }),
+            signal: controller.signal
+          });
+          if (res.status === 429) {
+            if (retries >= MAX_RETRIES) throw new Error(`API 限速，已重试 ${MAX_RETRIES} 次`);
+            const wait = RETRY_DELAYS[retries++];
+            console.log(`⚠️ 限速 429，${wait / 1000}秒后重试（第${retries}次）...`);
+            await new Promise(r => setTimeout(r, wait));
+            continue;
+          }
+          if (!res.ok) {
+            const errBody = await res.text().catch(() => '(无响应体)');
+            throw new Error(`API HTTP ${res.status}: ${errBody.slice(0, 200)}`);
+          }
+          const data = await res.json();
+          if (data.error) throw new Error(data.error.message);
+          if (!data.content?.[0]?.text) throw new Error('API 返回了空内容（content为空或无text字段）');
+          retries = 0;
+          const chunk = data.content[0].text;
+          fullText += chunk;
+          if (data.stop_reason === 'max_tokens') {
+            if (++continuations >= MAX_CONTINUATIONS) {
+              console.warn(`⚠️ 续跑已达${MAX_CONTINUATIONS}次上限，截断返回`);
+              continueLoop = false;
+            } else {
+              messages = [
+                { role: 'user', content: userMessage },
+                { role: 'assistant', content: fullText },
+                { role: 'user', content: '请继续从截断处继续输出，不要重复已有内容，直接接着写。' }
+              ];
+              console.log(`⚠️ 输出被截断，自动续跑（第${continuations}次）...`);
+            }
+          } else {
+            continueLoop = false;
+          }
+        } else if (apiType === 'gemini') {
+          const geminiModel = model || 'gemini-2.5-pro';
+          const geminiBase = (apiUrl || 'https://generativelanguage.googleapis.com').replace(/\/+$/, '');
+          const geminiEndpoint = /:generateContent/.test(geminiBase)
+            ? geminiBase
+            : `${geminiBase}/v1beta/models/${geminiModel}:generateContent`;
+          const contents = messages.map(m => ({
+            role: m.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: m.content }]
+          }));
+          const res = await fetch(geminiEndpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-goog-api-key': apiKey
+            },
+            body: JSON.stringify({
+              systemInstruction: { parts: [{ text: systemPrompt }] },
+              contents,
+              generationConfig: { maxOutputTokens: 8192 }
+            }),
+            signal: controller.signal
+          });
+          if (res.status === 429) {
+            if (retries >= MAX_RETRIES) throw new Error(`API 限速，已重试 ${MAX_RETRIES} 次`);
+            const wait = RETRY_DELAYS[retries++];
+            console.log(`⚠️ 限速 429，${wait / 1000}秒后重试（第${retries}次）...`);
+            await new Promise(r => setTimeout(r, wait));
+            continue;
+          }
+          if (!res.ok) {
+            const errBody = await res.text().catch(() => '(无响应体)');
+            throw new Error(`API HTTP ${res.status}: ${errBody.slice(0, 200)}`);
+          }
+          const data = await res.json();
+          if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+          const candidate = data.candidates?.[0];
+          if (!candidate) throw new Error('Gemini 返回了空内容（candidates 为空）');
+          if (candidate.finishReason === 'SAFETY' || candidate.finishReason === 'BLOCKLIST') {
+            throw new Error(`Gemini 触发安全过滤（${candidate.finishReason}）`);
+          }
+          const chunkText = candidate.content?.parts?.map(p => p.text || '').join('') || '';
+          if (!chunkText) throw new Error('Gemini 返回了空内容（parts 为空或无 text）');
+          retries = 0;
+          fullText += chunkText;
+          if (candidate.finishReason === 'MAX_TOKENS') {
+            if (++continuations >= MAX_CONTINUATIONS) {
+              console.warn(`⚠️ 续跑已达${MAX_CONTINUATIONS}次上限，截断返回`);
+              continueLoop = false;
+            } else {
+              messages = [
+                { role: 'user', content: userMessage },
+                { role: 'assistant', content: fullText },
+                { role: 'user', content: '请继续从截断处继续输出，不要重复已有内容，直接接着写。' }
+              ];
+              console.log(`⚠️ 输出被截断，自动续跑（第${continuations}次）...`);
+            }
+          } else {
+            continueLoop = false;
+          }
         } else {
-          messages = [
-            { role: 'user', content: userMessage },
-            { role: 'assistant', content: fullText },
-            { role: 'user', content: '请继续从截断处继续输出，不要重复已有内容，直接接着写。' }
-          ];
-          console.log(`⚠️ 输出被截断，自动续跑（第${continuations}次）...`);
+          const endpoint = apiUrl || 'https://api.deepseek.com/v1/chat/completions';
+          const bodyObj = {
+            model: model || 'deepseek-chat',
+            max_tokens: 8192,
+            messages: [{ role: 'system', content: systemPrompt }, ...messages]
+          };
+          if (config.jsonMode) {
+            bodyObj.response_format = { type: 'json_object' };
+          }
+          const res = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            body: JSON.stringify(bodyObj),
+            signal: controller.signal
+          });
+          if (res.status === 429) {
+            if (retries >= MAX_RETRIES) throw new Error(`API 限速，已重试 ${MAX_RETRIES} 次`);
+            const wait = RETRY_DELAYS[retries++];
+            console.log(`⚠️ 限速 429，${wait / 1000}秒后重试（第${retries}次）...`);
+            await new Promise(r => setTimeout(r, wait));
+            continue;
+          }
+          if (!res.ok) {
+            const errBody = await res.text().catch(() => '(无响应体)');
+            throw new Error(`API HTTP ${res.status}: ${errBody.slice(0, 200)}`);
+          }
+          const data = await res.json();
+          if (data.usage?.prompt_cache_hit_tokens) {
+            console.log(`   💾 缓存命中 ${data.usage.prompt_cache_hit_tokens} tokens（总 ${data.usage.prompt_tokens}）`);
+          }
+          if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+          if (!data.choices?.[0]?.message?.content) throw new Error('API 返回了空内容（choices为空或无content字段）');
+          retries = 0;
+          const choice = data.choices[0];
+          const chunk = choice.message.content;
+          fullText += chunk;
+          if (choice.finish_reason === 'length') {
+            if (++continuations >= MAX_CONTINUATIONS) {
+              console.warn(`⚠️ 续跑已达${MAX_CONTINUATIONS}次上限，截断返回`);
+              continueLoop = false;
+            } else {
+              messages = [
+                { role: 'user', content: userMessage },
+                { role: 'assistant', content: fullText },
+                { role: 'user', content: '请继续从截断处继续输出，不要重复已有内容，直接接着写。' }
+              ];
+              console.log(`⚠️ 输出被截断，自动续跑（第${continuations}次）...`);
+            }
+          } else {
+            continueLoop = false;
+          }
         }
-      } else {
-        continueLoop = false;
-      }
-    } else if (apiType === 'gemini') {
-      // Gemini: 端点格式 {base}/v1beta/models/{model}:generateContent
-      // apiUrl 留空→官方；填了→当作 base URL（兼容中转站）；已含 :generateContent 则直接用
-      const geminiModel = model || 'gemini-2.5-pro';
-      const geminiBase = (apiUrl || 'https://generativelanguage.googleapis.com').replace(/\/+$/, '');
-      const geminiEndpoint = /:generateContent/.test(geminiBase)
-        ? geminiBase
-        : `${geminiBase}/v1beta/models/${geminiModel}:generateContent`;
-
-      // 把 messages（可能含续跑的 assistant 消息）转成 Gemini 的 contents 格式
-      const contents = messages.map(m => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }]
-      }));
-
-      const res = await fetch(geminiEndpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey
-        },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemPrompt }] },
-          contents,
-          generationConfig: { maxOutputTokens: 8192 }
-        }),
-        signal: controller.signal
-      });
-      // 429 限速：退避重试
-      if (res.status === 429) {
-        if (retries >= MAX_RETRIES) throw new Error(`API 限速，已重试 ${MAX_RETRIES} 次`);
-        const wait = RETRY_DELAYS[retries++];
-        console.log(`⚠️ 限速 429，${wait / 1000}秒后重试（第${retries}次）...`);
-        await new Promise(r => setTimeout(r, wait));
-        continue;
-      }
-      // 非 429 HTTP 错误
-      if (!res.ok) {
-        const errBody = await res.text().catch(() => '(无响应体)');
-        throw new Error(`API HTTP ${res.status}: ${errBody.slice(0, 200)}`);
-      }
-      const data = await res.json();
-      if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
-      const candidate = data.candidates?.[0];
-      if (!candidate) throw new Error('Gemini 返回了空内容（candidates 为空）');
-      // 安全过滤触发时会没有 content
-      if (candidate.finishReason === 'SAFETY' || candidate.finishReason === 'BLOCKLIST') {
-        throw new Error(`Gemini 触发安全过滤（${candidate.finishReason}）`);
-      }
-      const chunkText = candidate.content?.parts?.map(p => p.text || '').join('') || '';
-      if (!chunkText) throw new Error('Gemini 返回了空内容（parts 为空或无 text）');
-      retries = 0;
-      fullText += chunkText;
-      if (candidate.finishReason === 'MAX_TOKENS') {
-        if (++continuations >= MAX_CONTINUATIONS) {
-          console.warn(`⚠️ 续跑已达${MAX_CONTINUATIONS}次上限，截断返回`);
-          continueLoop = false;
-        } else {
-          messages = [
-            { role: 'user', content: userMessage },
-            { role: 'assistant', content: fullText },
-            { role: 'user', content: '请继续从截断处继续输出，不要重复已有内容，直接接着写。' }
-          ];
-          console.log(`⚠️ 输出被截断，自动续跑（第${continuations}次）...`);
-        }
-      } else {
-        continueLoop = false;
-      }
-    } else {
-      const endpoint = apiUrl || 'https://api.deepseek.com/v1/chat/completions';
-const bodyObj = {
-        model: model || 'deepseek-chat',
-        max_tokens: 8192,
-        messages: [{ role: 'system', content: systemPrompt }, ...messages]
-      };
-      if (config.jsonMode) {
-        bodyObj.response_format = { type: 'json_object' };
-      }
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify(bodyObj),
-        signal: controller.signal
-      });
-
-      // 429 限速：退避重试
-      if (res.status === 429) {
-        if (retries >= MAX_RETRIES) throw new Error(`API 限速，已重试 ${MAX_RETRIES} 次`);
-        const wait = RETRY_DELAYS[retries++];
-        console.log(`⚠️ 限速 429，${wait / 1000}秒后重试（第${retries}次）...`);
-        await new Promise(r => setTimeout(r, wait));
-        continue;
-      }
-      // 非 429 HTTP 错误
-      if (!res.ok) {
-        const errBody = await res.text().catch(() => '(无响应体)');
-        throw new Error(`API HTTP ${res.status}: ${errBody.slice(0, 200)}`);
-      }
-      const data = await res.json();
-if (data.usage?.prompt_cache_hit_tokens) {
-        console.log(`   💾 缓存命中 ${data.usage.prompt_cache_hit_tokens} tokens（总 ${data.usage.prompt_tokens}）`);
-      }
-      if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
-      if (!data.choices?.[0]?.message?.content) throw new Error('API 返回了空内容（choices为空或无content字段）');
-      retries = 0; // 成功响应后重置重试计数
-      const choice = data.choices[0];
-      const chunk = choice.message.content;
-      fullText += chunk;
-      if (choice.finish_reason === 'length') {
-        if (++continuations >= MAX_CONTINUATIONS) {
-          console.warn(`⚠️ 续跑已达${MAX_CONTINUATIONS}次上限，截断返回`);
-          continueLoop = false;
-        } else {
-          messages = [
-            { role: 'user', content: userMessage },
-            { role: 'assistant', content: fullText },
-            { role: 'user', content: '请继续从截断处继续输出，不要重复已有内容，直接接着写。' }
-          ];
-          console.log(`⚠️ 输出被截断，自动续跑（第${continuations}次）...`);
-        }
-      } else {
-        continueLoop = false;
-      }
       } catch (fetchErr) {
-        // 网络层错误（超时/DNS/连接拒绝等）→ 抛给外层
         throw fetchErr;
       }
     }
