@@ -13,7 +13,7 @@ app.use(express.json({ limit: '20mb' }));
 app.use(express.static('public'));
 
 const jobs = new Map();
-const agentAJobs = new Map();  // 提前声明，与 jobs 同级，避免顶部 TTL 清理用 global 绕行
+const agentAJobs = new Map(); // 提前声明，与 jobs 同级，避免顶部 TTL 清理用 global 绕行
 
 // ============================================================
 // Job TTL 清理：避免 jobs / agentAJobs 两个 Map 无界增长
@@ -39,9 +39,9 @@ setInterval(() => {
 // 场景类型对应的镜头数规则（集中定义，validatePlan 只接收 limits 对象）
 // 新判断逻辑：只有纯武戏才走 wuxi 规则，其他（含混合场景）全部走 wenxi 规则
 const SCENE_RULES = {
-  wuxi:  { minShots: 3, maxShots: 6 },   // 武戏：少镜大冲击，每镜2-4秒
-  wenxi: { minShots: 5, maxShots: 8 },   // 文戏：默认 7 镜号（允许 5-8）·单镜 ≤3 秒·4 秒绝对不允许
-  mixed: { minShots: 5, maxShots: 8 },   // 混合：走文戏规则（detectSceneType 不再返回 mixed，这里只作兜底）
+  wuxi:  { minShots: 3, maxShots: 6 }, // 武戏：少镜大冲击，每镜2-4秒
+  wenxi: { minShots: 5, maxShots: 8 }, // 文戏：默认 7 镜号（允许 5-8）·单镜 ≤3 秒·4 秒绝对不允许
+  mixed: { minShots: 5, maxShots: 8 } // 混合：走文戏规则（detectSceneType 不再返回 mixed，这里只作兜底）
 };
 
 // 台词核验用的引号剥离正则（统一维护，避免各处不一致）
@@ -423,7 +423,7 @@ function parseScript(text) {
   const episodeMatch = workText.match(/【批注剧本】(.+)/);
   const episodeInfo = episodeMatch ? episodeMatch[1].trim() : '本集';
   const normalized = workText
-    .replace(/[─━—\-═]{8,}/g, '\n<<<SEP>>>\n')  // 含 ═ 匹配 Agent A 输出
+    .replace(/[─━—\-═]{8,}/g, '\n<<<SEP>>>\n') // 含 ═ 匹配 Agent A 输出
     .replace(/\*{8,}/g, '\n<<<SEP>>>\n');
   const rawParts = normalized.split('<<<SEP>>>');
 
@@ -1193,11 +1193,46 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
   // ══════════════════════════════════════════════════════════
   let p = `你将为同一个场景分片段写完整视频提示词（@+A+B+C+D+E+F六个部分）。本次任务只写一个片段，片段规划和需求在最后给出，先阅读以下共享上下文和写作规则。\n\n`;
 
-  // ── 字数限制提示（简洁版，规则细节已在 system prompt 中）──
-  p += `⛔ 字数上限：@+A+B+C+D+E+F 合计 ≤1800字。C部分每镜 ≤140字（7镜号场景）。D+E+F ≤300字。\n\n`;
+  p += `⛔⛔⛔ 硬性字数限制（违反即整条输出作废·比任何规则都优先）：\n`;
+  p += `@+A+B+C+D+E+F 全部内容合计 ≤ 1800字（含标点），超出即梦/Sora会截断导致后半段镜号丢失。\n`;
+  p += `字数预算（严格执行）：\n`;
+  p += `   · A部分 ≤180字：精简参数·每行关键词·禁止展开说明\n`;
+  p += `   · B部分 ≤200字：人物状态只写姿态和位置·不写服化道\n`;
+  p += `   · C部分 ≤1000字（7 镜号场景每镜 ≤140 字·6 镜号每镜 ≤160 字·5 镜号每镜 ≤200 字）\n`;
+  p += `   · D+E+F ≤300字：尾帧简洁·限制指令不超3条·必现目标不超3条\n\n`;
 
-  // 导演讲戏⚠️强调清单（片段间共享，简洁注入）
+  p += `⛔ C 部分压字数铁律（减少字数的同时保留铁律效果）：\n`;
+  p += `1. 每个镜号的叙事结构强制压缩为 3 段：\n`;
+  p += `   ① 镜号头部一行（景别+运镜+焦段）\n`;
+  p += `   ② 画面正文 2-3 句话：写谁在做什么·说什么·看哪里（每句 ≤25 字）\n`;
+  p += `   ③ （）物理反馈 1-2 组：具体物理现象（每组 ≤30 字）\n`;
+  p += `2. 禁止写以下文学化修辞（这些全部是字数杀手·且不是画面）：\n`;
+  p += `   ✗ "勾勒出他如铁塔般沉稳的轮廓"（比喻·不是画面）\n`;
+  p += `   ✗ "裂开了一丝缝隙·流露出深藏其下的心疼与温柔"（心理描述）\n`;
+  p += `   ✗ "那种拼尽全力的姿态·让一瘸一拐的跑动充满了悲壮感"（作者评论）\n`;
+  p += `   ✗ "眼神如冰冷的刀锋·逐一扫过那些尚未入画的敌人"（诗化语言）\n`;
+  p += `   ✗ "她的视线穿透镜头·死死锁住画面外的张玄"（心理描述·不是画面）\n`;
+  p += `3. 只写可拍到的物理事实：\n`;
+  p += `   ✓ "张玄侧脸·眼睛从平视缓慢转向下方"（物理动作）\n`;
+  p += `   ✓ "张雨晴撑地的手指节发白·右腿站起来时颤抖一下"（物理细节）\n`;
+  p += `4. 视线路径·听者反应·声画分离"嘴唇开合"等铁律仍要执行·但用最短的词写：\n`;
+  p += `   ✓ "视线从大屏移到研究员 N·头转向左侧"（8 字写完视线路径）\n`;
+  p += `   ✗ "她先是看着大屏上的张玄监控画面·然后缓缓把头转过来看向站在左边的研究员 N"（30 字·太啰嗦）\n`;
+  p += `5. 【B】人物状态禁止写："←AGENT_B 服化道锁定词"这类元说明·直接写具体姿态（"站立不动·双手垂落"）\n`;
+  p += `6. 【D】尾帧只写 2 行：空间变化一行·主要角色状态一行·传出接棒物一行·不展开\n`;
+  p += `7. 【E】限制指令最多 3 条·【F】必现目标最多 3 条·每条一行\n\n`;
+
+  // 导演指令优先级 + ⚠️强调清单（场景级共享）
   if (directorShots.length > 0) {
+    p += `⛔ 导演指令优先级高于自行判断：\n`;
+    p += `1. 导演批注里描述的具体动作不能改——"漂移甩尾"不能改成"直冲"，"三个视角"不能合成一个。\n`;
+    p += `2. 本片段规划的task如果引用了导演指令，C部分叙事必须按导演描述的方式写，不能自行替换。\n`;
+    p += `3. 导演标注了⚠️的内容，必须在C部分叙事中明确体现：\n`;
+    p += `   · "台词一定要重音" → 叙事写"在「XX」上刻意加重咬字"\n`;
+    p += `   · "一定要注重" → 叙事里必须有详细动作描写\n`;
+    p += `   · "一定要大声" → 叙事写"大声/提高音量"\n`;
+    p += `4. A部分格式统一：不加方括号，参数用·分隔。\n\n`;
+
     const mustItems = [];
     processDirectorNotes(scene.content, (match, inner) => {
       for (const line of inner.split('\n')) {
@@ -1213,6 +1248,76 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
       p += `\n`;
     }
   }
+
+  p += `⛔⛔⛔ 最优先铁律·防止指令泄漏（违反即整条输出作废）：\n`;
+  p += `以下所有规则是对你输出的【约束】，不是 C 部分的【内容】。\n`;
+  p += `禁止把任何规则文字、格式要求，元说明、"每个段落必须 XX"、"⚠️ XX 必须 YY"、"（⚠️ XX）"这类祈使句或括号元说明·写进最终输出里。\n`;
+  p += `C 部分只写画面叙事——摄影机运动 + 人物动作 + 台词 + （物理反馈）。\n`;
+  p += `不要在镜号之前或 C 部分开头加任何"格式声明"、"写法要求"、"规则说明"。\n`;
+  p += `不要用"（⚠️ ...）"或"（注：...）"或"（说明：...）"在 C 部分正文里出现。\n`;
+  p += `如果你想提醒自己某个规则，放在脑子里·不要写进输出。\n`;
+  p += `✗ 错误示范（规则泄漏到输出里）：\n`;
+  p += `  【C】镜头序列：\n`;
+  p += `  （⚠️ 每个段落以 [景别] 开头·武戏用英文[景别 (English)]·文戏用中文[景别]·后接复合运镜指令·三层缝合在同一句话里推进）\n`;
+  p += `  （⚠️ 武戏段落必须包含（）内的物理特效描述，文戏台词格式：动作状态+冒号+引号）\n`;
+  p += `  镜1  3s · [特写 (Extreme Close-up)]...\n`;
+  p += `✓ 正确示范（直接从镜1 开始·无任何元说明）：\n`;
+  p += `  【C】镜头序列：\n`;
+  p += `  镜1  3s · [特写 (Extreme Close-up)] 俯视锁定张玄右脚与地面接触点，接地面石板微震  焦段100mm\n`;
+  p += `  ...\n\n`;
+
+  p += `⛔ 通用写作规则（所有片段共享）：\n`;
+  p += `1. C部分镜号数量、时长必须与规划完全一致，不得增删。\n`;
+  p += `1a. 每个段落以 [景别] 开头：${scene.sceneType === 'wuxi' ? '武戏用英文如 [大特写 (Extreme Close-up)]' : '文戏用中文如 [近景]·[中近景]·[过肩]'}，后接复合运镜指令，焦段写在镜号头部或描述里。\n`;
+  p += `1b. ⚠️ 每个镜号必须三层缝合：第一层叙事+第二层摄影机运动（有情绪/力的理由）+第三层（）物理反馈，缺一不可。空壳镜号（只有说话没有运镜没有物理反馈）禁止输出。\n`;
+  p += `2. 含台词的镜号必须在叙事正文里写出台词原文（动作状态+冒号+引号）。\n`;
+  p += `3. OS独白必须以"角色OS：「引号原文」"格式写进对应镜号叙事正文。\n`;
+  p += `3b. 声画分离镜号（task含"声画分离"）：写纯画面叙事，开头注明"【声画分离】XX的OS/台词继续"，不重复写台词原文。画面按【文戏专项规则】规则十-补的三层优先级选择（①听者反应 ②说话者细节 ③空景环境）。\n`;
+  p += `3d. 反应镜号（task含"反应"）：纯画面·写听者的表情变化、身体反应、沉默。不写台词。让对话有呼吸感，不要从一句台词直接跳到下一句。\n`;
+  p += `4. C部分第一段第一句锚定入场景别和视角。\n`;
+  p += `5. 最后一段最后一句锚定出场景别和视角，并标注接棒物。\n\n`;
+
+  // ── 武戏专属规则 ──
+  if (scene.sceneType === 'wuxi') {
+    p += `\n【武戏专项规则】\n`;
+    p += `武1. 武戏三层缝合：第一层叙事+第二层镜头作为物理参与者（被力裹着走）+第三层（）材质物理反馈。（）内只写材质世界的物理反应——力从哪来·打到什么上·材质怎么形变·形变怎么扩散，不写情绪不写心理。\n`;
+    p += `武2. 武戏镜头允许大幅度运动——大特写到大全景、撞击式变焦、360度环绕、贴地疾驰、俯冲压下。镜头被动作的力拽着走。\n`;
+    p += `武3. 武戏五段式（蓄势→启动→爆发→收尾→余震）：每个镜号必须服务于五段式中的一个阶段，参考规划里 five_stage 字段。\n`;
+    p += `武4. 武戏（）写宏大物理破坏——金属交响·震荡波·材质粉碎·地面塌陷·血雾轨迹。\n`;
+  }
+
+  // ── 文戏专属规则 ──
+  if (scene.sceneType !== 'wuxi') {
+    p += `\n【文戏专项规则】（必须和 wenxi.txt 铁律 30 条 + 范例三/四/五对齐）\n`;
+    p += `文1. ⚠️ 动作线两层：第一层"道具任务"（吃饭/擦刀）来源是 AGENT_A 批注的【动作线设计】块或剧本原文；第二层"情绪驱动肢体"（往前走一步/转身/撑桌子/后退）是说话/听话时身体自然会做的事，必须写。批注的【动作线设计】里写"无道具任务"或没有该批注时，第一层不编，全靠第二层撑场面。\n`;
+    p += `文2. ⚠️ 听者身体反应：说话人说完立刻切走拍听者。听者是身体先动不是脸先动——上半身往后靠/手悬空/肩膀缩/笔掉了。说话人不能连续占两个以上镜号。\n`;
+    p += `文3. ⚠️ 台词三拍结构（重量台词必用）：情绪拐点句/决绝句/摊牌句/底牌句/情感爆发句必须写成三拍——拍一组织动作（台词前的物理动作·必须从情绪基线派生·决策者用"视线从 A 移到 B"·犹豫者才用"捏鼻梁/摸下巴"）+ 拍二伴随动作（说台词时的身体动作·一句话内有 2-3 个视线落点·中途换气）+ 拍三消化动作（台词后的物理反应·嘴唇抿紧/视线落下去/手放下）。⛔ 禁止"张嘴念完就闭嘴"的零拍台词——AI 视频模型看到零拍台词会生成成播音员念稿。\n`;
+    p += `文4. ⚠️ 动作情绪基线派生：每个动作必须从角色的情绪基线派生——决策者的动作偏硬精准有指令感（敲桌·视线锁定目标），犹豫者的动作偏软有拖拽感（捏鼻梁·摸下巴），承压方的动作内收退缩（肩缩·手扶桌借力）。禁止套通用模板"捏鼻梁=思考/搓手=紧张/握拳=愤怒"——这些对任何同类角色都成立，套到谁身上都不出戏。动笔前先回答：这个角色是谁？此刻在情绪基线的哪个位置？权力关系是施压还是承压？\n`;
+    p += `文5. ⚠️ 镜头运动克制：文戏镜头必须克制·单镜号内的空间跨度不能大·禁止武戏式的"大特写→大全景"戏剧性机位变化·禁止"极速拉远变焦"等大幅度运动。文戏镜头是低调的——推进半步·焦平面收紧·侧向平移·手持轻微抖动·停住见证。单镜号内允许硬切但节制（一般 2-3 个画面），切是为了让情绪落地，不是炫技。\n`;
+    p += `文6. ⚠️ 文戏默认 7 镜号：每个 15 秒文戏片段默认 7 个镜号（允许 5-8）·单镜 ≤3 秒·4 秒绝对不允许·3.5 秒也不允许，参考 wenxi.txt 范例三/四/五的规格。镜号头部格式："镜X  Xs · [景别] 复合运镜指令  焦段XXmm"。\n`;
+    p += `文7. ⚠️ 混合场景写法（本片段如果既有台词又有武戏动作）：按文戏规则写整个片段——武戏动作当作"大幅度的情绪驱动肢体"来写，镜头运动保持文戏克制（不做大特写→大全景），（）物理反馈可以偏武戏尺度（写刀锋冷光·格挡震动·衣料被气流带动）但不写宏大破坏。\n`;
+    p += `文8. ⚠️ 说话者视线路径（有台词镜号强制）：一句话内部必须有 2-3 个视线/头部落点——整句话盯着一个点说完会让 AI 生成表情冻住。\n`;
+    p += `     · 一对多场景：每句话看一个具体的听者·视线路径是"锁定目标"的弧线·最后闭环\n`;
+    p += `     · 一对一场景：80/30 配比（施压方 80% 锁定·承压方 30% 看对方 70% 躲避）\n`;
+    p += `     · 独白场景：视线必须有具体替身（大屏影像/墓碑/照片/窗外某点/镜子里的自己）不是虚空\n`;
+    p += `文9. ⚠️ 听者基线动作（双人同框镜号强制）：听者不能罚站·从镜1 第一秒起就有可见基线动作·反应必须是可见大动作。\n`;
+    p += `     · 基线动作范围：身体姿势可自编（扶桌·背手·插口袋·交叠手臂）；基线道具必须来自剧本或 B 服化道卡·不能瞎编\n`;
+    p += `     · 反应动作标准：抬头/扭头/低头/甩手/往后退半步/把手拿开/换重心/扶住某处借力（可见大动作）\n`;
+    p += `     · ⛔ 严禁微动作：喉结动/眉毛动/瞳孔变化/肌肉绷紧——AI 拍不出来观众看不见\n`;
+    p += `文10. ⚠️ 镜头方向铁律·同框对戏（双人/多人场景强制）：\n`;
+    p += `     · 两人对戏时听者必须在画面里以某种形式在场·禁止"对空气说话"\n`;
+    p += `     · 推荐构图（AI 友好）：说话者实焦·听者过肩虚焦给肩膀/衣服/衣领（不给头）\n`;
+    p += `     · ⛔ 禁止构图：说话者在前景虚焦不给头（AI 会混淆要不要对嘴·容易把台词处理成画外音）\n`;
+    p += `文11. ⚠️ 声画分离铁律（含台词镜号强制）：\n`;
+    p += `     · 声画分离 ≠ 画外音广播——角色永远在演"正在说话"这件事·即使画面焦点不在嘴上·身体也要有说话状态的外显表现\n`;
+    p += `     · 虚焦镜号的叙事必须写"嘴唇在虚焦里持续开合着"或"侧脸下颌线随说话节奏轻微起伏"或"肩膀随说话的呼吸节奏起伏着"\n`;
+    p += `     · 画面给到嘴 = 嘴和声音必须完全同步·禁止延迟对嘴\n`;
+    p += `     · ⛔ 禁止写法："【声画分离】XX 的声音从画外继续"——AI 会理解成角色像广播一样发声·身体静止\n`;
+    p += `     · ✓ 正确写法："【声画分离·画面聚焦 XX】前景角色在剪影里嘴唇持续开合着，侧脸下颌线随说话节奏轻微起伏，声音从前景传出：'台词原文'"\n`;
+    p += `     · 声画分离段结束后必须有 1.5 秒无台词缓冲镜号·让 AI 退出"画外音模式"\n`;
+  }
+
+  p += `\n⚠️ C部分禁止出现"导演""Agent""批注""强调"等内部术语。直接描写画面，不要说"导演强调的XX"。\n\n`;
 
   // 场景信息（稳定）
   p += `═══ 场景信息 ═══\n`;
@@ -1491,7 +1596,7 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
 
     // ✨ 片段级判类型：如果 seg 有独立 sceneType（被 C 方案校验覆写过），
     // 用片段级类型加载 system prompt·这样该片段拿到的是 wuxi.txt 而不是场景级的 wenxi.txt
-const effectiveSystemPrompt = (seg.sceneType && seg.sceneType !== scene.sceneType)
+    const effectiveSystemPrompt = (seg.sceneType && seg.sceneType !== scene.sceneType)
       ? buildSystemPrompt(seg.sceneType, { sceneContent: scene.content, dialogueCount: dialogues.length, characterCount: scene.characters.length, hasLongOS: /OS[：:]/.test(scene.content) && scene.content.length > 400 })
       : systemPrompt;
 
@@ -1508,7 +1613,7 @@ const effectiveSystemPrompt = (seg.sceneType && seg.sceneType !== scene.sceneTyp
         console.log(`✓ ${seg.id} 台词核验通过`);
       }
     }
-// ─── v7 字数 Cascade：先砍 F → 再砍 D → 最后才去 API 压缩 ───
+    // ─── v7 字数 Cascade：先砍 F → 再砍 D → 最后才去 API 压缩 ───
     let charCount = segOutput.replace(/<analysis>[\s\S]*?<\/analysis>/g, '').trim().length;
     if (charCount > 1800) {
       console.warn(`⚠️ ${seg.id} 字数 ${charCount}·启动 Cascade 压缩...`);
@@ -1654,9 +1759,22 @@ const effectiveSystemPrompt = (seg.sceneType && seg.sceneType !== scene.sceneTyp
       console.warn(`⚠️ ${scene.id} 全场景台词总检：${finalMissing.length} 条台词遗漏，智能定位补写...`);
       finalMissing.forEach((d, i) => console.warn(`   遗漏${i + 1}：${d.slice(0, 40)}...`));
 
+      // ─── ✨ 性能优化：预建台词→片段索引（避免 O(N×M×K) 嵌套循环）────────
+      // 构建 Map：台词文本 → 该台词在哪个片段
+      const dialogueSegMap = new Map();
+      for (let segIdx = 0; segIdx < outputs.length; segIdx++) {
+        if (outputs[segIdx].startsWith('[')) continue; // 跳过失败片段
+        for (const dlg of dialogues) {
+          if (verifyDialogues([dlg], outputs[segIdx]).length === 0) {
+            dialogueSegMap.set(dlg, segIdx);
+          }
+        }
+      }
+
       // ─── 智能定位：根据台词在剧本中的位置·找到它应该落在哪个片段 ───
       // 方法：用每条遗漏台词前一条已分配台词的所在片段作为目标
       // 如果都找不到·再退回到"最后一个片段"
+      const repairTasks = []; // 收集所有补写任务
       for (const missingDlg of finalMissing) {
         const mIdx = dialogues.indexOf(missingDlg);
         if (mIdx < 0) continue;
@@ -1665,33 +1783,24 @@ const effectiveSystemPrompt = (seg.sceneType && seg.sceneType !== scene.sceneTyp
         let targetSegIdx = -1;
         for (let i = mIdx - 1; i >= 0; i--) {
           const prevD = dialogues[i];
-          // 在所有片段输出里找这条台词的位置
-          for (let segIdx = 0; segIdx < outputs.length; segIdx++) {
-            if (outputs[segIdx].startsWith('[')) continue; // 跳过失败片段
-            if (verifyDialogues([prevD], outputs[segIdx]).length === 0) {
-              targetSegIdx = segIdx;
-              break;
-            }
+          if (dialogueSegMap.has(prevD)) {
+            targetSegIdx = dialogueSegMap.get(prevD);
+            break;
           }
-          if (targetSegIdx >= 0) break;
         }
 
         // 向前找不到·向后找
         if (targetSegIdx < 0) {
           for (let i = mIdx + 1; i < dialogues.length; i++) {
             const nextD = dialogues[i];
-            for (let segIdx = 0; segIdx < outputs.length; segIdx++) {
-              if (outputs[segIdx].startsWith('[')) continue;
-              if (verifyDialogues([nextD], outputs[segIdx]).length === 0) {
-                targetSegIdx = segIdx;
-                break;
-              }
+            if (dialogueSegMap.has(nextD)) {
+              targetSegIdx = dialogueSegMap.get(nextD);
+              break;
             }
-            if (targetSegIdx >= 0) break;
           }
         }
 
-        // 都找不到·退回最后一个片段
+        // 都找不到·退回最后一个有效片段
         if (targetSegIdx < 0) {
           targetSegIdx = outputs.length - 1;
           while (targetSegIdx >= 0 && outputs[targetSegIdx].startsWith('[')) targetSegIdx--;
@@ -1703,10 +1812,36 @@ const effectiveSystemPrompt = (seg.sceneType && seg.sceneType !== scene.sceneTyp
         }
 
         console.log(`   📍 台词 "${missingDlg.slice(0, 25)}..." 定位到片段 ${targetSegIdx + 1}/${outputs.length}`);
+        repairTasks.push({ missingDlg, targetSegIdx });
+      }
+
+      // ─── ✨ 核心优化：并行补写 + 写入冲突处理 ───────────────────────
+      // 同一片段可能收到多条遗漏台词，合并后一次调用 API
+      const segRepairMap = new Map(); // segIdx → [missingDialogues]
+      for (const task of repairTasks) {
+        if (!segRepairMap.has(task.targetSegIdx)) {
+          segRepairMap.set(task.targetSegIdx, []);
+        }
+        segRepairMap.get(task.targetSegIdx).push(task.missingDlg);
+      }
+
+      // 并行执行所有补写
+      const repairPromises = Array.from(segRepairMap.entries()).map(async ([segIdx, missingDlgs]) => {
         try {
-          outputs[targetSegIdx] = await repairMissingDialogues([missingDlg], outputs[targetSegIdx], systemPrompt, config);
+          const newOutput = await repairMissingDialogues(missingDlgs, outputs[segIdx], systemPrompt, config);
+          return { segIdx, newOutput, success: true };
         } catch (err) {
-          console.warn(`⚠️ 台词补写失败：${err.message}`);
+          console.warn(`⚠️ 片段 ${segIdx + 1} 补写失败：${err.message}`);
+          return { segIdx, newOutput: outputs[segIdx], success: false };
+        }
+      });
+
+      const repairResults = await Promise.all(repairPromises);
+
+      // 合并结果（只更新成功的）
+      for (const result of repairResults) {
+        if (result.success) {
+          outputs[result.segIdx] = result.newOutput;
         }
       }
 
@@ -1715,7 +1850,7 @@ const effectiveSystemPrompt = (seg.sceneType && seg.sceneType !== scene.sceneTyp
       if (finalMissing2.length > 0) {
         console.warn(`⚠️ ${scene.id} 智能补写后仍有 ${finalMissing2.length} 条遗漏·最后兜底到末尾片段`);
         // 最后的最后·还漏的再全塞到末尾
-        const lastIdx = outputs.findIndex((o, i) => !o.startsWith('[') && i === outputs.length - 1);
+        const lastIdx = outputs.findLastIndex((o, i) => !o.startsWith('[') && i === outputs.length - 1);
         const fallbackIdx = lastIdx >= 0 ? lastIdx : outputs.length - 1;
         if (fallbackIdx >= 0 && !outputs[fallbackIdx].startsWith('[')) {
           try {
@@ -2744,14 +2879,14 @@ app.post('/api/agent-a/annotate', async (req, res) => {
         const prevFeel = i > 0 ? sceneFeels[i - 1] : null;
         const options = isDirectorMode
           ? {
-              sceneSegments: segsByScene[scene.id] || [],
-              globalSegments: globalSegs,
-              prevFeel,
-            }
+            sceneSegments: segsByScene[scene.id] || [],
+            globalSegments: globalSegs,
+            prevFeel
+          }
           : {
-              soulCard,
-              prevFeel,
-            };
+            soulCard,
+            prevFeel
+          };
         const userPrompt = annotationV7.buildAnnotationPromptV7(scene, items, isDirectorMode ? 'director' : 'ai', options);
 
         // 第三步：调用 API（启用 JSON mode）
@@ -2804,12 +2939,12 @@ app.post('/api/agent-a/annotate', async (req, res) => {
         job.validations[i] = {
           sceneId: scene.id,
           stats: annotationV7.getAnnotationStatsV7(items, data),
-          errors: errors || [],
+          errors: errors || []
         };
         job.progress[i] = {
           sceneId: scene.id,
           status: 'done',
-          message: errors.length > 0 ? `完成（${errors.length}条警告）` : '完成 ✓',
+          message: errors.length > 0 ? `完成（${errors.length}条警告）` : '完成 ✓'
         };
       } catch (err) {
         console.error(`❌ 场景${scene.id} 失败:`, err.message);
@@ -2884,7 +3019,7 @@ app.get('/api/agent-a/download/:jobId', (req, res) => {
   const job = agentAJobs.get(req.params.jobId);
   if (!job?.finalResult) return res.status(404).json({ error: 'not found' });
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-  res.setHeader('Content-Disposition', "attachment; filename*=UTF-8''annotated-script-" + Date.now() + '.txt');
+  res.setHeader('Content-Disposition', 'attachment; filename*=UTF-8\'\'annotated-script-' + Date.now() + '.txt');
   res.send('Agent A 批注版剧本\n生成时间：' + new Date().toLocaleString('zh-CN') + '\n\n' + job.finalResult);
 });
 
