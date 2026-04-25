@@ -237,8 +237,10 @@ function buildAnnotationPromptV7(scene, items, mode, options = {}) {
     p += `分析规则：\n`;
     p += `1. 所有批注来源于剧作方法论 + 剧本原文推理，不编造剧本未发生的情节。\n`;
     p += `2. 每条【人物内心】必须同时给心理状态（mental）和身体反应（body）两层·只有心理没有身体的批注无效。\n`;
-    p += `3. 重要情绪节点必须标稳帧点（stable_frame）。\n`;
-    p += `4. 开场如果缺少"暖"的建立·或世界观未交代·用 cold_open 字段标出。\n`;
+    p += `3. 重要情绪节点必须标稳帧点（stable_frame）。下列情况必须有稳帧点：①情绪大转折点②关键信息揭露③人物崩溃/爆发时刻④主角宣告性台词。格式："哪一帧·停多久·为什么"。\n`;
+    p += `4. 禁止项（forbid）要分散到具体条目，不要堆在 forbidden_global。每个禁止项格式：{ "what": "最怕拍成什么样", "why": "为什么这样拍会削弱效果" }。禁止项必须写 why，不能只写 what。\n`;
+    p += `5. must_flag=true 的触发条件：剧本中有"必须""一定要""重音""⚠️"等强强调标记时才设置。不要滥用。\n`;
+    p += `6. 开场如果缺少"暖"的建立·或世界观未交代·用 cold_open 字段标出。\n`;
     p += `\n`;
   }
 
@@ -257,15 +259,13 @@ function buildAnnotationPromptV7(scene, items, mode, options = {}) {
   p += `   · structure_node: 结构节点类型\n`;
   p += `   · action_thread: 数组·每个有名字的角色一条·字段 {character, task, source}·source 三选一："剧本原文" / "上下文推断" / "无"·无道具任务时 task 写"无道具任务·依赖第二层情绪驱动肢体"\n`;
   p += `   · action_thread_turning_point: 一句话·指向某条 ID·说明情绪拐点处谁的动作线怎么变\n`;
-  p += `5. 可选字段：forbidden_global（全场禁止项数组）·cold_open（开场铺垫需求对象，可空）\n`;
-  p += `6. annotations[ID] 当 status="annotated" 时的可选字段：\n`;
+  p += `5. forbidden_global 尽量少用·禁止项应分散到各条目的 forbid 字段。\n`;
+  p += `6. annotations[ID] 当 status="annotated" 时的字段要求：\n`;
   p += `   · intent_capture: 数组·每条是"具体可拍的画面"（不是情绪词）\n`;
-  p += `   · stable_frame: 字符串·"哪一帧·停多久·为什么"\n`;
-  p += `   · intent_gap: { "gap": "...", "plan": "...", "priority": "必须补" | "建议补" }\n`;
-  p += `   · camera_options: [ { "label": "方案A", "detail": "..." }, ... ]\n`;
+  p += `   · stable_frame: 重要情绪节点必须标。格式："哪一帧·停多久·为什么"\n`;
   p += `   · inner: { "mental": "...", "body": ["...", "..."] }  — body 必须是可拍的具体身体动作·不是形容词\n`;
-  p += `   · forbid: { "what": "...", "why": "..." }\n`;
-  p += `   · must_flag: true/false — 导演标注了⚠️必须/一定要时为 true\n`;
+  p += `   · forbid: { "what": "...", "why": "..." } — why 不能省略\n`;
+  p += `   · must_flag: true/false — 只有剧本有强强调（"必须""一定要"）时才设 true\n`;
   p += `\n`;
 
   // ─── Schema 示例 ───
@@ -280,10 +280,9 @@ function buildAnnotationPromptV7(scene, items, mode, options = {}) {
   p += `    { "character": "王龙", "task": "无道具任务·依赖第二层情绪驱动肢体", "source": "无" }\n`;
   p += `  ],\n`;
   p += `  "action_thread_turning_point": "D2 王龙喊出祸害你妹妹·张玄检查手指的动作骤停·头抬起来",\n`;
-  p += `  "forbidden_global": ["张玄不要愤怒·要冷静的杀意"],\n`;
   p += `  "cold_open": null,\n`;
   p += `  "annotations": {\n`;
-  p += `    "A1": { "status": "annotated", "intent_capture": ["大特写锁定张玄右手·指节翻转时的细节"], "inner": { "mental": "不屑·自我确认", "body": ["低头看自己的手·翻来覆去地看", "眼神完全不在王龙身上"] } },\n`;
+  p += `    "A1": { "status": "annotated", "intent_capture": ["大特写锁定张玄右手·指节翻转时的细节"], "stable_frame": "手指悬在半空·停0.5秒·确认信息后的瞬间凝固", "inner": { "mental": "不屑·自我确认", "body": ["低头看自己的手·翻来覆去地看", "眼神完全不在王龙身上"] } },\n`;
   p += `    "D1": { "status": "no_annotation" },\n`;
   p += `    "D2": { "status": "annotated", "must_flag": true, "inner": { "mental": "纯动物性生理恐惧", "body": ["喉管被掐·声音发不全", "嘴张着像鱼"] }, "forbid": { "what": "戏剧化的认出旧敌表演", "why": "王龙是原始求生·不是戏剧识别" } }\n`;
   p += `  }\n`;
@@ -307,8 +306,15 @@ function parseAnnotationJSON(text) {
     return JSON.parse(text);
   } catch {}
 
-  // 第二层：截取第一个 { 到最后一个 }
+  // 预处理：过滤掉 MiniMax 等模型的思维链标签
   let clean = text.replace(/```json|```/g, '').trim();
+  clean = clean.replace(/[\n\r]*<\/think>[\s\S]*?<think>[\n\r]*/gi, '\n');
+  clean = clean.replace(/[\n\r]*<\/思考>[\s\S]*?<思考>[\n\r]*/gi, '\n');
+  clean = clean.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  clean = clean.replace(/<思考>[\s\S]*?<\/思考>/gi, '');
+  clean = clean.trim();
+
+  // 第二层：截取第一个 { 到最后一个 }
   const start = clean.indexOf('{');
   const end = clean.lastIndexOf('}');
   if (start === -1 || end === -1 || end < start) return null;

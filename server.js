@@ -609,12 +609,8 @@ async function callAPI(systemPrompt, userMessage, config) {
           throw new Error(`API HTTP ${res.status}: ${errBody.slice(0, 200)}`);
         }
         responseData = await res.json();
-        if (responseData.error) throw new Error(responseData.error.message || JSON.stringify(responseData.error));
         const candidate = responseData.candidates?.[0];
-        if (!candidate) throw new Error('Gemini 返回了空内容（candidates 为空）');
-        if (candidate.finishReason === 'SAFETY' || candidate.finishReason === 'BLOCKLIST') {
-          throw new Error(`Gemini 触发安全过滤（${candidate.finishReason}）`);
-        }
+        if (!candidate) throw new Error('Gemini 返回了空内容（无 candidates）');
         const chunkText = candidate.content?.parts?.map(p => p.text || '').join('') || '';
         if (!chunkText) throw new Error('Gemini 返回了空内容（parts 为空）');
         retries = 0;
@@ -622,13 +618,22 @@ async function callAPI(systemPrompt, userMessage, config) {
         stopReason = candidate.finishReason === 'MAX_TOKENS' ? 'length' : null;
 
       } else {
-        // DeepSeek / OpenAI 兼容
-        const endpoint = apiUrl || 'https://api.deepseek.com/v1/chat/completions';
-        const bodyObj = {
-          model: model || 'deepseek-chat',
-          max_tokens: 8192,
-          messages: [{ role: 'system', content: systemPrompt }, ...messages]
-        };
+        // DeepSeek / MiniMax / 其他 OpenAI 兼容 API
+        const endpoint = apiUrl || (apiType === 'minimax'
+          ? 'https://api.minimaxi.com/v1/chat/completions'
+          : 'https://api.deepseek.com/v1/chat/completions');
+        const bodyObj = apiType === 'minimax'
+          ? {
+              // MiniMax OpenAI 兼容接口
+              model: model || 'MiniMax-M2.7',
+              max_completion_tokens: config.maxTokens || 8192,
+              messages: [{ role: 'system', content: systemPrompt }, ...messages]
+            }
+          : {
+              model: model || 'deepseek-chat',
+              max_tokens: 8192,
+              messages: [{ role: 'system', content: systemPrompt }, ...messages]
+            };
         if (config.jsonMode) {
           bodyObj.response_format = { type: 'json_object' };
         }
@@ -657,9 +662,19 @@ async function callAPI(systemPrompt, userMessage, config) {
         if (responseData.error) throw new Error(responseData.error.message || JSON.stringify(responseData.error));
         if (!responseData.choices?.[0]?.message?.content) throw new Error('API 返回了空内容');
         retries = 0;
-        const chunk = responseData.choices[0].message.content;
+        let chunk = responseData.choices[0].message.content;
+        // MiniMax-M2.7 等模型可能包含 <think> 思维链标签，需要过滤掉
+        chunk = chunk.replace(/<think>/gi, '').replace(/<\/think>/gi, '').trim();
         fullText += chunk;
-        stopReason = responseData.choices[0].finish_reason === 'length' ? 'length' : null;
+        // MiniMax 的 finish_reason 可能不准确，如果内容不以 } 结尾就续跑
+        const rawFinishReason = responseData.choices[0].finish_reason;
+        const isCompleteJson = fullText.trim().endsWith('}');
+        const wasTruncated = rawFinishReason === 'length' || (!isCompleteJson && chunk.length > 100);
+        if (apiType === 'minimax') {
+          console.log(`   MiniMax finish_reason: ${rawFinishReason}, endsWithBrace: ${isCompleteJson}, chunkLen: ${chunk.length}, totalLen: ${fullText.length}`);
+          console.log(`   MiniMax 最后50字符: ${fullText.trim().slice(-50)}`);
+        }
+        stopReason = wasTruncated ? 'length' : null;
       }
 
       // ── 成功：判断是否需要续跑 ──
@@ -691,7 +706,10 @@ async function callAPI(systemPrompt, userMessage, config) {
           throw new Error(`API 网络失败，已重试 ${MAX_RETRIES} 次：${err.message}`);
         }
         const wait = RETRY_DELAYS[retries++];
-        console.log(`⚠️ 网络错误 ${wait / 1000}s后重试（第${retries}次）: ${err.message.slice(0, 80)}`);
+        console.log(`⚠️ 网络错误 (${apiType}) ${wait / 1000}s后重试（第${retries}次）: ${err.message.slice(0, 100)}`);
+        if (apiType === 'minimax') {
+          console.log(`   MiniMax API URL: ${endpoint}`);
+        }
         await new Promise(r => setTimeout(r, wait));
         continue;
       }
@@ -2203,6 +2221,7 @@ function stripMarkdown(text) {
     .replace(/^---+\s*$/gm, '')
     .replace(/^>\s?/gm, '')
     .replace(/```[\s\S]*?```/g, m => m.replace(/^```\w*\n?/, '').replace(/\n?```$/, ''))
+    .replace(/<think>/gi, '').replace(/<\/think>/gi, '') // 清理 MiniMax/M2.7 思维链标签
     .replace(/\n{3,}/g, '\n\n');
 }
 

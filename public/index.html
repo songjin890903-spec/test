@@ -159,6 +159,7 @@ textarea { resize: vertical; min-height: 80px; }
           <option value="anthropic">Anthropic Claude</option>
           <option value="openai">OpenAI 兼容</option>
           <option value="gemini">Google Gemini</option>
+          <option value="minimax">MiniMax</option>
         </select>
       </div>
       <div>
@@ -177,6 +178,12 @@ textarea { resize: vertical; min-height: 80px; }
             <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
             <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
             <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+          </optgroup>
+          <optgroup label="MiniMax" id="modelGroupMiniMax" style="display:none">
+            <option value="MiniMax-M2.7">MiniMax-M2.7（推荐）</option>
+            <option value="MiniMax-M2.7-highspeed">MiniMax-M2.7-highspeed</option>
+            <option value="MiniMax-M2.5">MiniMax-M2.5</option>
+            <option value="MiniMax-M2.1">MiniMax-M2.1</option>
           </optgroup>
           <option value="_custom">自定义...</option>
         </select>
@@ -430,11 +437,13 @@ function onApiTypeChange() {
   document.getElementById('modelGroupClaude').style.display = apiType === 'anthropic' ? '' : 'none';
   document.getElementById('modelGroupOai').style.display = apiType === 'openai' ? '' : 'none';
   document.getElementById('modelGroupGemini').style.display = apiType === 'gemini' ? '' : 'none';
+  document.getElementById('modelGroupMiniMax').style.display = apiType === 'minimax' ? '' : 'none';
   // 自动选中对应组的第一个选项
   const defaultModel = {
     anthropic: 'claude-sonnet-4-6',
     openai: 'deepseek-chat',
-    gemini: 'gemini-2.5-pro'
+    gemini: 'gemini-2.5-pro',
+    minimax: 'MiniMax-M2.7'
   }[apiType];
   document.getElementById('model').value = defaultModel;
   document.getElementById('modelCustom').classList.add('hidden');
@@ -442,7 +451,8 @@ function onApiTypeChange() {
   const placeholders = {
     anthropic: '留空=https://api.anthropic.com / 或填中转站',
     openai: '例如 https://api.deepseek.com/v1/chat/completions',
-    gemini: '留空=https://generativelanguage.googleapis.com / 或填中转站'
+    gemini: '留空=https://generativelanguage.googleapis.com / 或填中转站',
+    minimax: '留空=https://api.minimax.chat/v1'
   };
   document.getElementById('apiUrl').placeholder = placeholders[apiType];
 }
