@@ -666,15 +666,13 @@ async function callAPI(systemPrompt, userMessage, config) {
         // MiniMax-M2.7 等模型可能包含 <think> 思维链标签，需要过滤掉
         chunk = chunk.replace(/<think>/gi, '').replace(/<\/think>/gi, '').trim();
         fullText += chunk;
-        // MiniMax 的 finish_reason 可能不准确，如果内容不以 } 结尾就续跑
+        // MiniMax 的 finish_reason 可能不准确，只信任 'length'（max_tokens 触顶）
+        // finish_reason === 'stop' 表示模型已正常结束，不应强制续跑
         const rawFinishReason = responseData.choices[0].finish_reason;
-        const isCompleteJson = fullText.trim().endsWith('}');
-        const wasTruncated = rawFinishReason === 'length' || (!isCompleteJson && chunk.length > 100);
         if (apiType === 'minimax') {
-          console.log(`   MiniMax finish_reason: ${rawFinishReason}, endsWithBrace: ${isCompleteJson}, chunkLen: ${chunk.length}, totalLen: ${fullText.length}`);
-          console.log(`   MiniMax 最后50字符: ${fullText.trim().slice(-50)}`);
+          console.log(`   MiniMax finish_reason: ${rawFinishReason}, chunkLen: ${chunk.length}, totalLen: ${fullText.length}`);
         }
-        stopReason = wasTruncated ? 'length' : null;
+        stopReason = (rawFinishReason === 'length') ? 'length' : null;
       }
 
       // ── 成功：判断是否需要续跑 ──
