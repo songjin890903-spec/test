@@ -127,6 +127,8 @@ textarea { resize: vertical; min-height: 80px; }
 .sub-step-done { background: rgba(34,197,94,0.12); color: #86efac; }
 .sub-step-active { background: rgba(245,158,11,0.12); color: #fcd34d; }
 .sub-step-pending { background: rgba(255,255,255,0.04); color: #555; }
+.step-time { color: #888; font-size: 9px; margin-left: 2px; }
+.step-time-active { color: #fcd34d; }
 
 /* 错误通知横幅 */
 .error-banner { background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); border-radius: 8px;
@@ -1082,7 +1084,15 @@ function renderSubSteps(steps) {
   for (const s of steps) {
     const cls = s.done ? 'sub-step-done' : s.active ? 'sub-step-active' : 'sub-step-pending';
     const icon = s.done ? '✓' : s.active ? '●' : '○';
-    html += `<span class="sub-step ${cls}">${icon} ${escapeHtml(s.name)}</span>`;
+    let timeInfo = '';
+    if (s.done && s.endTime && s.startTime) {
+      const duration = Math.round((s.endTime - s.startTime) / 1000);
+      timeInfo = ` <span class="step-time">(${duration}s)</span>`;
+    } else if (s.active && s.startTime) {
+      const elapsed = Math.round((Date.now() - s.startTime) / 1000);
+      timeInfo = ` <span class="step-time step-time-active">(${elapsed}s)</span>`;
+    }
+    html += `<span class="sub-step ${cls}">${icon} ${escapeHtml(s.name)}${timeInfo}</span>`;
   }
   html += '</div>';
   return html;
@@ -1154,7 +1164,7 @@ async function fetchGenerateResults(jobId, resultEl, mode) {
     const results = data.results;
 
     let html = '<div style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;">';
-    html += `<button class="btn btn-primary btn-sm" onclick="copyAllClean()">复制全部纯提示词</button>`;
+    html += `<button class="btn btn-primary btn-sm" onclick="copyAllClean(event)">复制全部纯提示词</button>`;
     html += `<button class="btn btn-outline btn-sm" onclick="downloadResults('clean')">下载纯提示词版</button>`;
     html += `<button class="btn btn-outline btn-sm" onclick="downloadResults('full')">下载完整版</button>`;
     html += '</div>';
@@ -1313,25 +1323,72 @@ function cleanPromptContent(content) {
 // 复制单个片段
 function copySegmentText(btn) {
   const text = decodeURIComponent(atob(btn.dataset.text));
-  navigator.clipboard.writeText(text).then(() => {
-    btn.textContent = '已复制';
-    setTimeout(() => { btn.textContent = '复制'; }, 1500);
-  });
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text).then(() => {
+      btn.textContent = '已复制';
+      setTimeout(() => { btn.textContent = '复制'; }, 1500);
+    }).catch(err => {
+      console.error('复制失败:', err);
+      alert('复制失败，请手动复制');
+    });
+  } else {
+    // 降级方案：使用传统方法
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+      document.execCommand('copy');
+      btn.textContent = '已复制';
+      setTimeout(() => { btn.textContent = '复制'; }, 1500);
+    } catch (err) {
+      console.error('复制失败:', err);
+      alert('复制失败，请手动复制');
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  }
 }
 
 // 复制单个场景全部片段
-function copySceneClean(index) {
+function copySceneClean(index, event) {
   if (!window._generateResults?.[index]) return;
   const clean = cleanPromptContent(window._generateResults[index].content);
-  navigator.clipboard.writeText(clean).then(() => {
-    const btn = event.target;
-    btn.textContent = '已复制';
-    setTimeout(() => { btn.textContent = '复制'; }, 1500);
-  });
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(clean).then(() => {
+      const btn = event?.target;
+      if (btn) {
+        btn.textContent = '已复制';
+        setTimeout(() => { btn.textContent = '复制'; }, 1500);
+      }
+    }).catch(err => {
+      console.error('复制失败:', err);
+      alert('复制失败，请手动复制');
+    });
+  } else {
+    // 降级方案
+    const textarea = document.createElement('textarea');
+    textarea.value = clean;
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+      document.execCommand('copy');
+      const btn = event?.target;
+      if (btn) {
+        btn.textContent = '已复制';
+        setTimeout(() => { btn.textContent = '复制'; }, 1500);
+      }
+    } catch (err) {
+      console.error('复制失败:', err);
+      alert('复制失败，请手动复制');
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  }
 }
 
 // 复制全部场景的纯提示词
-function copyAllClean() {
+function copyAllClean(event) {
   if (!window._generateResults) return;
   let all = '';
   for (const r of window._generateResults) {
@@ -1339,12 +1396,39 @@ function copyAllClean() {
     all += `${'═'.repeat(50)}\n场景 ${r.sceneId}  ${r.sceneHeader}  ${typeLabel}\n${'═'.repeat(50)}\n\n`;
     all += cleanPromptContent(r.content) + '\n\n';
   }
-  navigator.clipboard.writeText(all).then(() => {
-    const btn = event.target;
-    const orig = btn.textContent;
-    btn.textContent = '已复制全部';
-    setTimeout(() => { btn.textContent = orig; }, 1500);
-  });
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(all).then(() => {
+      const btn = event?.target;
+      if (btn) {
+        const orig = btn.textContent;
+        btn.textContent = '已复制全部';
+        setTimeout(() => { btn.textContent = orig; }, 1500);
+      }
+    }).catch(err => {
+      console.error('复制失败:', err);
+      alert('复制失败，请手动复制');
+    });
+  } else {
+    // 降级方案
+    const textarea = document.createElement('textarea');
+    textarea.value = all;
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+      document.execCommand('copy');
+      const btn = event?.target;
+      if (btn) {
+        const orig = btn.textContent;
+        btn.textContent = '已复制全部';
+        setTimeout(() => { btn.textContent = orig; }, 1500);
+      }
+    } catch (err) {
+      console.error('复制失败:', err);
+      alert('复制失败，请手动复制');
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  }
 }
 
 function downloadResults(type) {

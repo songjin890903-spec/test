@@ -1445,14 +1445,37 @@ function generateScenePlanBlock(plan, scene, dialogues) {
 // doneCount = 已完成数量（0-4）；当前 active = doneCount 那一项
 function setSceneProgress(job, idx, sceneId, status, message, doneCount = 0) {
   const STEP_NAMES = ['规划', 'A参数', '写作', '验证'];
-  job.progress[idx] = {
-    sceneId, status, message,
-    steps: STEP_NAMES.map((name, i) => ({
+  const now = Date.now();
+  if (!job.progress[idx]) {
+    job.progress[idx] = { sceneId, status, message, steps: [] };
+  }
+  if (!job.progress[idx].steps || job.progress[idx].steps.length === 0) {
+    job.progress[idx].steps = STEP_NAMES.map((name, i) => ({
       name,
-      done: i < doneCount,
-      active: i === doneCount && status === 'processing'
-    }))
-  };
+      done: false,
+      active: false,
+      startTime: null,
+      endTime: null
+    }));
+  }
+  for (let i = 0; i < STEP_NAMES.length; i++) {
+    const step = job.progress[idx].steps[i];
+    if (i < doneCount) {
+      step.done = true;
+      step.active = false;
+      if (!step.endTime) step.endTime = now;
+    } else if (i === doneCount && status === 'processing') {
+      step.done = false;
+      step.active = true;
+      if (!step.startTime) step.startTime = now;
+    } else {
+      step.done = false;
+      step.active = false;
+    }
+  }
+  job.progress[idx].sceneId = sceneId;
+  job.progress[idx].status = message;
+  job.progress[idx].message = message;
 }
 
 // 多步处理一个场景：规划 → 逐片段写作
