@@ -625,7 +625,7 @@ async function callAPI(systemPrompt, userMessage, config) {
         const bodyObj = apiType === 'minimax'
           ? {
               // MiniMax OpenAI 兼容接口
-              model: model || 'MiniMax-M2.7',
+              model: model || 'MiniMax-M2',
               max_completion_tokens: config.maxTokens || 8192,
               messages: [{ role: 'system', content: systemPrompt }, ...messages]
             }
