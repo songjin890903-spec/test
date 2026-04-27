@@ -233,8 +233,8 @@ function extractDialogues(sceneContent) {
     if (!trimmed || trimmed === '【无特殊批注】') continue;
     if (!trimmed.includes('：')) continue;
     if (excludePrefixes.some(p => trimmed.startsWith(p))) {
-      // 豁免（旁白）和（画外音）——它们是有效的OS台词行
-      if (!trimmed.startsWith('（旁白）') && !trimmed.startsWith('（画外音）')) continue;
+      // 豁免（旁白）（画外音）（VO）——它们都是有效的OS/旁白台词行
+      if (!trimmed.startsWith('（旁白）') && !trimmed.startsWith('（画外音）') && !trimmed.startsWith('（VO）')) continue;
     }
     const colonIdx = trimmed.indexOf('：');
     const charPart = trimmed.substring(0, colonIdx);
@@ -244,6 +244,12 @@ function extractDialogues(sceneContent) {
     // 避免误过滤含"禁止""知道""内容"等词的正常台词
     if (excludeKeywords.some(kw => charPart.includes(kw))) continue;
     dialogues.push(trimmed);
+  }
+  // 日志：显示提取到的 VO/旁白台词（方便排查漏台词问题）
+  const voLines = dialogues.filter(d => d.startsWith('（VO）') || d.startsWith('（旁白）') || d.startsWith('（画外音）'));
+  if (voLines.length > 0) {
+    console.log(`   [extractDialogues] VO/旁白台词 ${voLines.length} 条：`);
+    voLines.forEach(v => console.log(`      ${v.slice(0, 60)}`));
   }
   return dialogues;
 }

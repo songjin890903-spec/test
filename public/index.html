@@ -1287,7 +1287,18 @@ function splitSegments(cleanContent) {
   }
 
   if (positions.length === 0) {
-    return [{ title: '全部内容', text: cleanContent }];
+    // 找不到片段标记——用更宽松的规则再试一次（某些 AI 输出可能使用不同格式）
+    const looseRegex = /【\S*?片段\S*?】|【\S*?\d+-\d+[A-Z]】|片段\s+\d+-\d+[A-Z]/g;
+    let m2;
+    while ((m2 = looseRegex.exec(cleanContent)) !== null) {
+      // 跳过已找到的位置（去重）
+      if (positions.some(p => p.matchIndex === m2.index)) continue;
+      positions.push({ start: m2.index, matchIndex: m2.index });
+    }
+    if (positions.length === 0) {
+      console.warn('[splitSegments] 未找到任何片段标记，显示全部内容');
+      return [{ title: '全部内容', text: cleanContent }];
+    }
   }
 
   const segments = [];
@@ -1301,6 +1312,7 @@ function splitSegments(cleanContent) {
       text
     });
   }
+  console.log(`[splitSegments] 找到 ${segments.length} 个片段`);
   return segments;
 }
 
