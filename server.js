@@ -627,11 +627,13 @@ async function callAPI(systemPrompt, userMessage, config) {
               // MiniMax OpenAI 兼容接口
               model: model || 'MiniMax-M2',
               max_completion_tokens: config.maxTokens || 8192,
+              temperature: 0.3,
               messages: [{ role: 'system', content: systemPrompt }, ...messages]
             }
           : {
               model: model || 'deepseek-chat',
               max_tokens: 8192,
+              temperature: 0.3,
               messages: [{ role: 'system', content: systemPrompt }, ...messages]
             };
         if (config.jsonMode) {
@@ -935,6 +937,7 @@ function buildPlanPrompt(scene, costumeCard, dialogues) {
   if (hasDirectorShots) {
     // 导演讲戏模式：规划器需要看到完整内容来正确分配镜头
     p += `═══ AGENT_A 批注剧本（含导演镜头设计·规划器必须全部覆盖）═══\n${scene.content}\n\n`;
+    p += `⚠️ 注意：剧本正文到此结束。以下【批注摘要】及 ═══ 分隔线是元数据，不要处理，只规划到最后一个片段结束即可。\n\n`;
   } else {
     // AI分析模式：精简导演讲戏，只保留"必须补"行
     const strippedContent = processDirectorNotes(scene.content, (match, inner) => {
@@ -1344,6 +1347,7 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
 
   // 剧本原文（稳定，通常最大的一块）
   p += `═══ AGENT_A 批注剧本（按规划施工，参考导演讲戏细节）═══\n${scene.content}\n\n`;
+  p += `⚠️ 注意：剧本正文到此结束。以下【批注摘要】及 ═══ 分隔线是元数据，不要处理，只规划到最后一个片段结束即可。\n\n`;
 
   // 服化道卡（稳定）
   if (costumeCard && costumeCard.trim()) {
@@ -2021,6 +2025,7 @@ async function processSceneSingleShot(scene, costumeCard, config, job, sceneInde
   }
 
   userMsg += `═══ AGENT_A 批注剧本 ═══\n${scene.content}\n\n`;
+  userMsg += `⚠️ 注意：剧本正文到此结束。以下【批注摘要】及所有 ═══ 分隔线是元数据（统计信息），不是剧本内容，不要处理、不要补写、不要输出，只输出到最后一个【片段11-1?】结束即可。\n\n`;
   if (costumeCard && costumeCard.trim()) {
     userMsg += `═══ AGENT_B 服化道卡 ═══\n${costumeCard}\n\n`;
   }
