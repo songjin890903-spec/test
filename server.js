@@ -2269,6 +2269,7 @@ function parseRawScript(text) {
     if (f1) { sid = f1[1]; hdr = f1[2].trim(); }
     if (!sid) { const f2 = t.match(/^场景(\S+)\s+(.+)/); if (f2) { sid = f2[1]; hdr = f2[2].trim(); } }
     if (!sid) { const f3 = t.match(/^第(\S+)[场幕]\s*(.*)/); if (f3) { sid = f3[1]; hdr = f3[2].trim() || '第' + f3[1] + '场'; } }
+    if (!sid) { const f4 = t.match(/^(\d+[-–]\d+[A-Za-z]?)\s+(.+?)\s+(日|夜|晨|黄昏|傍晚|清晨)\s+(内|外|内外)/); if (f4) { sid = f4[1]; hdr = f4[3] + ' ' + f4[4] + ' ' + f4[2].trim(); } }
     if (sid) {
       if (cur) scenes.push(cur);
       const lm = hdr.match(/[内外]\s+(.+)$/) || hdr.match(/(?:外|内)\s*(.+)/);
