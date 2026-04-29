@@ -46,6 +46,7 @@ app.use(session({
 const upload = multer({ dest: 'uploads/', limits: { fileSize: 50 * 1024 * 1024 } });
 app.use(express.json({ limit: '20mb' }));
 app.use(express.static('public'));
+app.use('/uploads', express.static('uploads'));
 
 // ================================================================
 // 工具函数：MD5 哈希
@@ -520,47 +521,47 @@ function parseScript(text) {
 
   let currentEpisode = detectEpisode(workText.slice(0, 500)) || '01';
 
+  // Agent A 输出可能带 markdown 粗体标记（**场景1-1 ...**），先剥离再匹配
+  // 对每行剥离行首 **、行尾 **、行首 ### 等 markdown 格式，用于场景标题匹配
+  const stripMd = (s) => s.replace(/^\*{1,3}\s*|\s*\*{1,3}$/gm, '').replace(/^#{1,6}\s*/gm, '');
+
   for (const part of parts) {
     const trimmed = part.trim();
     if (!trimmed) continue;
     const ep = detectEpisode(trimmed.slice(0, 200));
     if (ep) currentEpisode = ep;
-    let sceneId = null, fullHeader = null;
-
-    // Agent A 输出可能带 markdown 粗体标记（**场景1-1 ...**），先剥离再匹配
-    // 对每行剥离行首 **、行尾 **、行首 ### 等 markdown 格式，用于场景标题匹配
-    const stripMd = (s) => s.replace(/^\*{1,3}\s*|\s*\*{1,3}$/gm, '').replace(/^#{1,6}\s*/gm, '');
     const stripped = stripMd(trimmed);
 
-    const fmt1 = stripped.match(/^场景(\S+)\s+([^\n]+)/m);
-    if (fmt1) { sceneId = fmt1[1]; fullHeader = fmt1[2].trim().replace(/\*+/g, ''); }
-    if (!sceneId) {
-      const fmt2 = stripped.match(/^(\d+[-–]\d+[A-Za-z]?)\s+([^\n*]+)/m);
-      if (fmt2) { sceneId = fmt2[1]; fullHeader = fmt2[2].trim().replace(/\*+/g, ''); }
+    // 用 matchAll 匹配所有场景（一个 part 可能包含多个场景如 1-1 和 1-2）
+    const sceneMatches = [];
+    for (const m of stripped.matchAll(/^\s*(?:场景(\S+)|(\d+[-–]\d+[A-Za-z]?)|第(\S+)[场幕]|【([^】]{1,20})】)\s+([^\n]*)/gm)) {
+      let sceneId = m[1] || m[2] || m[3] || m[4];
+      let fullHeader = (m[5] || '').trim().replace(/\*+/g, '');
+      if (!sceneId || (m[4] && !/\d/.test(m[4]))) continue; // 【】格式必须含数字
+      sceneMatches.push({ sceneId, fullHeader, index: m.index });
     }
-    if (!sceneId) {
-      const fmt3 = stripped.match(/^第(\S+)[场幕]\s*([^\n]*)/m);
-      if (fmt3) { sceneId = fmt3[1]; fullHeader = (fmt3[2].trim() || `第${fmt3[1]}场`).replace(/\*+/g, ''); }
-    }
-    if (!sceneId) {
-      const fmt4 = stripped.match(/^【([^】]{1,20})】\s*([^\n]*)/m);
-      if (fmt4 && /\d/.test(fmt4[1])) { sceneId = fmt4[1]; fullHeader = (fmt4[2].trim() || fmt4[1]).replace(/\*+/g, ''); }
-    }
-    if (!sceneId) continue;
 
-    const locationMatch = fullHeader.match(/[内外]\s+(.+)$/) || fullHeader.match(/(?:外|内)\s*(.+)/);
-    const location = locationMatch ? locationMatch[1].trim() : fullHeader;
-    // 人物行也可能带 markdown 粗体
-    const charMatch = trimmed.match(/\*{0,2}人物[：:]\*{0,2}\s*(.+)/);
-    const characters = charMatch
-      ? charMatch[1].replace(/\*+/g, '').split(/[·，,、\s]+/).map(c => c.trim()).filter(Boolean)
-      : [];
+    if (sceneMatches.length === 0) continue;
 
-    scenes.push({
-      id: sceneId, header: fullHeader, location, characters,
-      content: trimmed, episode: currentEpisode, episodeInfo,
-      sceneType: detectSceneType(trimmed)
-    });
+    for (let si = 0; si < sceneMatches.length; si++) {
+      const { sceneId, fullHeader, index } = sceneMatches[si];
+      // 内容：从这个场景标题位置到下一个场景标题（或到part末尾）
+      const nextIndex = si + 1 < sceneMatches.length ? sceneMatches[si + 1].index : trimmed.length;
+      const sceneContent = trimmed.slice(index, nextIndex).trim();
+
+      const locationMatch = fullHeader.match(/[内外]\s+(.+)$/) || fullHeader.match(/(?:外|内)\s*(.+)/);
+      const location = locationMatch ? locationMatch[1].trim() : fullHeader;
+      const charMatch = sceneContent.match(/\*{0,2}人物[：:]\*{0,2}\s*(.+)/);
+      const characters = charMatch
+        ? charMatch[1].replace(/\*+/g, '').split(/[·，,、\s]+/).map(c => c.trim()).filter(Boolean)
+        : [];
+
+      scenes.push({
+        id: sceneId, header: fullHeader, location, characters,
+        content: sceneContent, episode: currentEpisode, episodeInfo,
+        sceneType: detectSceneType(sceneContent)
+      });
+    }
   }
 
   const episodeMap = {};
@@ -2327,10 +2328,15 @@ function parseRawScript(text) {
     const epM = t.match(/第\s*(\d+)\s*[集话]/);
     if (epM) ep = epM[1].padStart(2, '0');
     let sid = null, hdr = null;
+    // 格式1: 1-1 日 外 地点 或 1-1 傍晚 外 地点（标准顺序）
     const f1 = t.match(/^(?:场景)?(\d+[-–]\d+[A-Za-z]?)\s+((?:日|夜|晨|黄昏|傍晚|清晨)\s+(?:内|外|内外)\s+.+)/);
     if (f1) { sid = f1[1]; hdr = f1[2].trim(); }
+    // 格式2: 场景xxx 内容
     if (!sid) { const f2 = t.match(/^场景(\S+)\s+(.+)/); if (f2) { sid = f2[1]; hdr = f2[2].trim(); } }
+    // 格式3: 第xxx场 内容
     if (!sid) { const f3 = t.match(/^第(\S+)[场幕]\s*(.*)/); if (f3) { sid = f3[1]; hdr = f3[2].trim() || '第' + f3[1] + '场'; } }
+    // 格式4: 1-1 郊区旧楼 傍晚 外（地点在时间词之前）
+    if (!sid) { const f4 = t.match(/^(\d+[-–]\d+[A-Za-z]?)\s+(\S+(?:\s+\S+)?)\s+(日|夜|晨|黄昏|傍晚|清晨)\s+([内外]+)\s*(.*)/); if (f4) { sid = f4[1]; hdr = f4[3] + ' ' + f4[4] + ' ' + f4[2] + (f4[5] ? ' ' + f4[5] : ''); } }
     if (sid) {
       if (cur) scenes.push(cur);
       const lm = hdr.match(/[内外]\s+(.+)$/) || hdr.match(/(?:外|内)\s*(.+)/);
@@ -3146,8 +3152,8 @@ app.post('/api/auth/login', async (req, res) => {
   if (!username || !password) {
     return res.status(400).json({ error: '账号和密码不能为空' });
   }
-  if (username.length > 8) {
-    return res.status(400).json({ error: '账号长度不能超过8位' });
+  if (username.length > 15) {
+    return res.status(400).json({ error: '账号长度不能超过15位' });
   }
   if (password.length < 6) {
     return res.status(400).json({ error: '密码长度不能少于6位' });
@@ -3222,7 +3228,7 @@ app.post('/api/auth/change-password', requireAuth, async (req, res) => {
 app.get('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {
   try {
     const [rows] = await pool.query(
-      'SELECT id, username, is_admin, created_at, is_deleted FROM users ORDER BY created_at ASC'
+      'SELECT id, username, name, is_admin, created_at, is_deleted FROM users ORDER BY created_at ASC'
     );
     res.json({ users: rows });
   } catch (err) {
@@ -3233,15 +3239,18 @@ app.get('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {
 
 // POST /api/admin/users — 新增账号（admin 本身不可新建）
 app.post('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {
-  const { username, password, isAdmin } = req.body || {};
+  const { username, password, name } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ error: '账号和密码不能为空' });
   }
-  if (username.length > 8) {
-    return res.status(400).json({ error: '账号长度不能超过8位' });
+  if (username.length > 15) {
+    return res.status(400).json({ error: '账号长度不能超过15位' });
   }
   if (password.length < 6) {
     return res.status(400).json({ error: '密码长度不能少于6位' });
+  }
+  if (name && name.length > 20) {
+    return res.status(400).json({ error: '姓名长度不能超过20位' });
   }
   try {
     // 检查用户名唯一
@@ -3251,8 +3260,8 @@ app.post('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {
     }
     // 不允许通过接口创建 admin 身份，只能是普通用户
     await pool.query(
-      'INSERT INTO users (username, password, is_admin) VALUES (?, ?, 0)',
-      [username, md5(password)]
+      'INSERT INTO users (username, name, password, is_admin) VALUES (?, ?, ?, 0)',
+      [username, name || null, md5(password)]
     );
     res.json({ ok: true });
   } catch (err) {
@@ -3261,17 +3270,18 @@ app.post('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-// PUT /api/admin/users/:id — 修改账号（仅密码，账号名不可改）
+// PUT /api/admin/users/:id — 修改账号（密码+姓名，账号名不可改）
 app.put('/api/admin/users/:id', requireAuth, requireAdmin, async (req, res) => {
   const userId = parseInt(req.params.id, 10);
-  const { password } = req.body || {};
+  const { password, name } = req.body || {};
   if (!password) return res.status(400).json({ error: '密码不能为空' });
   if (password.length < 6) return res.status(400).json({ error: '密码长度不能少于6位' });
+  if (name && name.length > 20) return res.status(400).json({ error: '姓名长度不能超过20位' });
   try {
     // 检查目标存在且未删除
     const [rows] = await pool.query('SELECT id FROM users WHERE id=? AND is_deleted=0', [userId]);
     if (rows.length === 0) return res.status(404).json({ error: '账号不存在' });
-    await pool.query('UPDATE users SET password=? WHERE id=?', [md5(password), userId]);
+    await pool.query('UPDATE users SET password=?, name=? WHERE id=?', [md5(password), name || null, userId]);
     res.json({ ok: true });
   } catch (err) {
     console.error('[/api/admin/users PUT]', err);

@@ -8,9 +8,38 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system,'PingFang SC','Microsoft YaHei',sans-serif; background:#0f1117; color:#e0e0e0; min-height:100vh; display:flex; }
 .sidebar { width:220px; min-height:100vh; background:#12141c; border-right:1px solid #2a2d38; display:flex; flex-direction:column; flex-shrink:0; }
-.sidebar-logo { padding:20px 16px; border-bottom:1px solid #2a2d38; text-align:center; }
-.sidebar-logo h2 { font-size:16px; font-weight:700; color:#fff; }
-.sidebar-logo p { font-size:11px; color:#555; margin-top:2px; }
+.sidebar-logo {
+  padding:16px;
+  border-bottom:1px solid #2a2d38;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  height:80px;
+  box-sizing:border-box;
+}
+.sidebar-logo img {
+  width:48px;
+  height:48px;
+  border-radius:10px;
+  object-fit:cover;
+  flex-shrink:0;
+}
+.sidebar-logo-right {
+  flex:1;
+  margin-left:10px;
+  text-align:right;
+}
+.sidebar-logo-right h2 {
+  font-size:14px;
+  font-weight:700;
+  color:#fff;
+  line-height:1.2;
+}
+.sidebar-logo-right p {
+  font-size:11px;
+  color:#555;
+  margin-top:2px;
+}
 .sidebar-nav { flex:1; padding:12px 8px; }
 .nav-item { display:flex; align-items:center; gap:10px; padding:11px 14px; border-radius:8px; font-size:13px; color:#888; cursor:pointer; transition:all .15s; user-select:none; margin-bottom:4px; }
 .nav-item:hover { background:#1a1d27; color:#ccc; }
@@ -139,7 +168,13 @@ textarea { resize:vertical; min-height:80px; }
 
 <!-- 侧边栏 -->
 <div class="sidebar">
-  <div class="sidebar-logo"><h2>🎬 提示词工具</h2><p>运营后台</p></div>
+  <div class="sidebar-logo">
+    <img src="/uploads/logo.png" alt="Logo" onerror="this.style.display='none';">
+    <div class="sidebar-logo-right">
+      <h2>运营后台</h2>
+      <p></p>
+    </div>
+  </div>
   <nav class="sidebar-nav">
     <div class="nav-section-label">功能菜单</div>
     <div class="nav-item active" id="navTool" onclick="switchPage('tool')">✨ 生成提示词</div>
@@ -341,7 +376,7 @@ textarea { resize:vertical; min-height:80px; }
           <div id="userTableStatus"></div>
           <div class="user-table-wrap">
             <table class="user-table">
-              <thead><tr><th>账号</th><th>角色</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead>
+              <thead><tr><th>账号</th><th>姓名</th><th>角色</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead>
               <tbody id="userTableBody"></tbody>
             </table>
           </div>
@@ -370,7 +405,8 @@ textarea { resize:vertical; min-height:80px; }
 <div class="modal-overlay" id="modalAddUser">
   <div class="modal">
     <h3>➕ 新增账号</h3>
-    <div class="form-group"><label>账号 <span style="color:#555;font-weight:400;">（最多8位，不允许重复）</span></label><input type="text" id="addUsername" placeholder="输入账号" maxlength="8" autocomplete="off"></div>
+    <div class="form-group"><label>账号 <span style="color:#555;font-weight:400;">（最多15位，不允许重复）</span></label><input type="text" id="addUsername" placeholder="输入账号" maxlength="15" autocomplete="off"></div>
+    <div class="form-group"><label>姓名 <span style="color:#555;font-weight:400;">（最多20位）</span></label><input type="text" id="addName" placeholder="输入姓名（可选）" maxlength="20"></div>
     <div class="form-group"><label>密码 <span style="color:#555;font-weight:400;">（至少6位）</span></label><input type="password" id="addPassword" placeholder="输入密码" minlength="6"></div>
     <div id="modalAddUserStatus"></div>
     <div class="btn-group">
@@ -382,12 +418,13 @@ textarea { resize:vertical; min-height:80px; }
 
 <div class="modal-overlay" id="modalResetPwd">
   <div class="modal">
-    <h3>🔑 重置账号密码</h3>
-    <p style="font-size:13px;color:#888;margin-bottom:16px;">正在重置账号 <strong id="resetPwdUsername" style="color:#fff;"></strong> 的密码</p>
+    <h3>🔑 修改账号信息</h3>
+    <p style="font-size:13px;color:#888;margin-bottom:16px;">正在修改账号 <strong id="resetPwdUsername" style="color:#fff;"></strong></p>
+    <div class="form-group"><label>姓名 <span style="color:#555;font-weight:400;">（最多20位）</span></label><input type="text" id="resetName" placeholder="输入姓名（可选，留空则清除）" maxlength="20"></div>
     <div class="form-group"><label>新密码 <span style="color:#555;font-weight:400;">（至少6位）</span></label><input type="password" id="resetPassword" placeholder="输入新密码" minlength="6"></div>
     <div id="modalResetPwdStatus"></div>
     <div class="btn-group">
-      <button class="btn btn-success" onclick="doResetPassword()">确认重置</button>
+      <button class="btn btn-success" onclick="doResetPassword()">确认修改</button>
       <button class="btn btn-outline" onclick="closeModal('modalResetPwd')">取消</button>
     </div>
   </div>
@@ -469,23 +506,26 @@ async function loadUserList() {
     const d = await res.json();
     se.innerHTML = '';
     const users = d.users || [];
-    if (!users.length) { tb.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#555;">暂无账号</td></tr>'; return; }
+    if (!users.length) { tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#555;">暂无账号</td></tr>'; return; }
     tb.innerHTML = users.map(u => {
       const del = !!u.is_deleted, admin = !!u.is_admin;
-      return '<tr><td>'+u.username+'</td><td><span class="badge '+(admin?'badge-admin':'badge-normal')+'">'+(admin?'管理员':'普通用户')+'</span></td><td>'+((u.created_at||'').slice(0,16).replace('T',' '))+'</td><td>'+(del?'<span class="badge badge-deleted">已删除</span>':'<span class="check-item check-ok">正常</span>')+'</td><td style="display:flex;gap:6px;align-items:center;">'+(del?'':'<button class="btn btn-outline btn-sm" onclick="openResetPwdModal('+u.id+',\''+u.username+'\')">改密</button>')+(!del&&u.id!==currentUser?.userId?' <button class="btn btn-danger btn-sm" onclick="deleteUser('+u.id+')">删除</button>':'')+(del?' <span style="font-size:11px;color:#555;">已软删除</span>':'')+'</td></tr>';
+      return '<tr><td>'+u.username+'</td><td>'+(u.name||'-')+'</td><td><span class="badge '+(admin?'badge-admin':'badge-normal')+'">'+(admin?'管理员':'普通用户')+'</span></td><td>'+((u.created_at||'').slice(0,16).replace('T',' '))+'</td><td>'+(del?'<span class="badge badge-deleted">已删除</span>':'<span class="check-item check-ok">正常</span>')+'</td><td style="display:flex;gap:6px;align-items:center;">'+(del?'':'<button class="btn btn-outline btn-sm" onclick="openResetPwdModal('+u.id+',\''+u.username+'\',\''+(u.name||'')+'\')">修改</button>')+(!del&&u.id!==currentUser?.userId?' <button class="btn btn-danger btn-sm" onclick="deleteUser('+u.id+')">删除</button>':'')+(del?' <span style="font-size:11px;color:#555;">已软删除</span>':'')+'</td></tr>';
     }).join('');
   } catch (_) { se.innerHTML = '<div class="status status-error">加载失败</div>'; }
 }
 
-function openAddUserModal() { ['addUsername','addPassword'].forEach(id=>document.getElementById(id).value=''); document.getElementById('modalAddUserStatus').innerHTML=''; document.getElementById('modalAddUser').classList.add('show'); }
+function openAddUserModal() { ['addUsername','addPassword','addName'].forEach(id=>document.getElementById(id).value=''); document.getElementById('modalAddUserStatus').innerHTML=''; document.getElementById('modalAddUser').classList.add('show'); }
 async function doAddUser() {
-  const u = document.getElementById('addUsername').value.trim(), p = document.getElementById('addPassword').value;
+  const u = document.getElementById('addUsername').value.trim();
+  const n = document.getElementById('addName').value.trim();
+  const p = document.getElementById('addPassword').value;
   const el = document.getElementById('modalAddUserStatus');
   if (!u) { el.innerHTML='<div class="status status-error">账号不能为空</div>'; return; }
-  if (u.length>8) { el.innerHTML='<div class="status status-error">账号长度不能超过8位</div>'; return; }
+  if (u.length>15) { el.innerHTML='<div class="status status-error">账号长度不能超过15位</div>'; return; }
+  if (n.length>20) { el.innerHTML='<div class="status status-error">姓名长度不能超过20位</div>'; return; }
   if (p.length<6) { el.innerHTML='<div class="status status-error">密码长度不能少于6位</div>'; return; }
   try {
-    const res = await fetch('/api/admin/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});
+    const res = await fetch('/api/admin/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u, name:n||null, password:p})});
     const d = await res.json();
     if (!res.ok) { el.innerHTML='<div class="status status-error">'+(d.error||'创建失败')+'</div>'; return; }
     el.innerHTML='<div class="status status-success">账号创建成功！</div>';
@@ -493,22 +533,25 @@ async function doAddUser() {
   } catch(_) { el.innerHTML='<div class="status status-error">网络异常</div>'; }
 }
 
-function openResetPwdModal(id, username) {
+function openResetPwdModal(id, username, name) {
   currentResetUserId = id;
   document.getElementById('resetPwdUsername').textContent = username;
+  document.getElementById('resetName').value = name || '';
   document.getElementById('resetPassword').value = '';
   document.getElementById('modalResetPwdStatus').innerHTML = '';
   document.getElementById('modalResetPwd').classList.add('show');
 }
 async function doResetPassword() {
+  const n = document.getElementById('resetName').value.trim();
   const p = document.getElementById('resetPassword').value;
   const el = document.getElementById('modalResetPwdStatus');
+  if (n.length>20) { el.innerHTML='<div class="status status-error">姓名长度不能超过20位</div>'; return; }
   if (p.length<6) { el.innerHTML='<div class="status status-error">密码长度不能少于6位</div>'; return; }
   try {
-    const res = await fetch('/api/admin/users/'+currentResetUserId,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p})});
+    const res = await fetch('/api/admin/users/'+currentResetUserId,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p, name:n||null})});
     const d = await res.json();
     if (!res.ok) { el.innerHTML='<div class="status status-error">'+(d.error||'修改失败')+'</div>'; return; }
-    el.innerHTML='<div class="status status-success">密码重置成功！</div>';
+    el.innerHTML='<div class="status status-success">账号信息修改成功！</div>';
     setTimeout(()=>{closeModal('modalResetPwd');loadUserList();},800);
   } catch(_) { el.innerHTML='<div class="status status-error">网络异常</div>'; }
 }
