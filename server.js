@@ -458,47 +458,47 @@ function parseScript(text) {
 
   let currentEpisode = detectEpisode(workText.slice(0, 500)) || '01';
 
+  // Agent A 输出可能带 markdown 粗体标记（**场景1-1 ...**），先剥离再匹配
+  // 对每行剥离行首 **、行尾 **、行首 ### 等 markdown 格式，用于场景标题匹配
+  const stripMd = (s) => s.replace(/^\*{1,3}\s*|\s*\*{1,3}$/gm, '').replace(/^#{1,6}\s*/gm, '');
+
   for (const part of parts) {
     const trimmed = part.trim();
     if (!trimmed) continue;
     const ep = detectEpisode(trimmed.slice(0, 200));
     if (ep) currentEpisode = ep;
-    let sceneId = null, fullHeader = null;
-
-    // Agent A 输出可能带 markdown 粗体标记（**场景1-1 ...**），先剥离再匹配
-    // 对每行剥离行首 **、行尾 **、行首 ### 等 markdown 格式，用于场景标题匹配
-    const stripMd = (s) => s.replace(/^\*{1,3}\s*|\s*\*{1,3}$/gm, '').replace(/^#{1,6}\s*/gm, '');
     const stripped = stripMd(trimmed);
 
-    const fmt1 = stripped.match(/^场景(\S+)\s+([^\n]+)/m);
-    if (fmt1) { sceneId = fmt1[1]; fullHeader = fmt1[2].trim().replace(/\*+/g, ''); }
-    if (!sceneId) {
-      const fmt2 = stripped.match(/^(\d+[-–]\d+[A-Za-z]?)\s+([^\n*]+)/m);
-      if (fmt2) { sceneId = fmt2[1]; fullHeader = fmt2[2].trim().replace(/\*+/g, ''); }
+    // 用 matchAll 匹配所有场景（一个 part 可能包含多个场景如 1-1 和 1-2）
+    const sceneMatches = [];
+    for (const m of stripped.matchAll(/^\s*(?:场景(\S+)|(\d+[-–]\d+[A-Za-z]?)|第(\S+)[场幕]|【([^】]{1,20})】)\s+([^\n]*)/gm)) {
+      let sceneId = m[1] || m[2] || m[3] || m[4];
+      let fullHeader = (m[5] || '').trim().replace(/\*+/g, '');
+      if (!sceneId || (m[4] && !/\d/.test(m[4]))) continue; // 【】格式必须含数字
+      sceneMatches.push({ sceneId, fullHeader, index: m.index });
     }
-    if (!sceneId) {
-      const fmt3 = stripped.match(/^第(\S+)[场幕]\s*([^\n]*)/m);
-      if (fmt3) { sceneId = fmt3[1]; fullHeader = (fmt3[2].trim() || `第${fmt3[1]}场`).replace(/\*+/g, ''); }
-    }
-    if (!sceneId) {
-      const fmt4 = stripped.match(/^【([^】]{1,20})】\s*([^\n]*)/m);
-      if (fmt4 && /\d/.test(fmt4[1])) { sceneId = fmt4[1]; fullHeader = (fmt4[2].trim() || fmt4[1]).replace(/\*+/g, ''); }
-    }
-    if (!sceneId) continue;
 
-    const locationMatch = fullHeader.match(/[内外]\s+(.+)$/) || fullHeader.match(/(?:外|内)\s*(.+)/);
-    const location = locationMatch ? locationMatch[1].trim() : fullHeader;
-    // 人物行也可能带 markdown 粗体
-    const charMatch = trimmed.match(/\*{0,2}人物[：:]\*{0,2}\s*(.+)/);
-    const characters = charMatch
-      ? charMatch[1].replace(/\*+/g, '').split(/[·，,、\s]+/).map(c => c.trim()).filter(Boolean)
-      : [];
+    if (sceneMatches.length === 0) continue;
 
-    scenes.push({
-      id: sceneId, header: fullHeader, location, characters,
-      content: trimmed, episode: currentEpisode, episodeInfo,
-      sceneType: detectSceneType(trimmed)
-    });
+    for (let si = 0; si < sceneMatches.length; si++) {
+      const { sceneId, fullHeader, index } = sceneMatches[si];
+      // 内容：从这个场景标题位置到下一个场景标题（或到part末尾）
+      const nextIndex = si + 1 < sceneMatches.length ? sceneMatches[si + 1].index : trimmed.length;
+      const sceneContent = trimmed.slice(index, nextIndex).trim();
+
+      const locationMatch = fullHeader.match(/[内外]\s+(.+)$/) || fullHeader.match(/(?:外|内)\s*(.+)/);
+      const location = locationMatch ? locationMatch[1].trim() : fullHeader;
+      const charMatch = sceneContent.match(/\*{0,2}人物[：:]\*{0,2}\s*(.+)/);
+      const characters = charMatch
+        ? charMatch[1].replace(/\*+/g, '').split(/[·，,、\s]+/).map(c => c.trim()).filter(Boolean)
+        : [];
+
+      scenes.push({
+        id: sceneId, header: fullHeader, location, characters,
+        content: sceneContent, episode: currentEpisode, episodeInfo,
+        sceneType: detectSceneType(sceneContent)
+      });
+    }
   }
 
   const episodeMap = {};
