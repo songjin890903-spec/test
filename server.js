@@ -4,13 +4,84 @@ const multer = require('multer');
 const mammoth = require('mammoth');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const session = require('express-session');
+const MySQLStore = require('connect-mysql')(session);
+const mysql = require('mysql2/promise');
 
 const app = express();
 const PORT = process.env.PORT || 3006;
 
+// ================================================================
+// MySQL 连接池（读取 .env 中的 DB_* 配置，无则使用默认值）
+// ================================================================
+const DB_CONFIG = {
+  host:     process.env.DB_HOST     || 'localhost',
+  port:     parseInt(process.env.DB_PORT || '3306', 10),
+  user:     process.env.DB_USER     || 'root',
+  password: process.env.DB_PASSWORD || 'root',
+  database: process.env.DB_NAME     || 'prompt_tool_admin',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+};
+
+const pool = mysql.createPool(DB_CONFIG);
+
+// ================================================================
+// Session 中间件（使用 MySQL 存储）
+// ================================================================
+app.use(session({
+  secret:            process.env.SESSION_SECRET || 'prompt-tool-session-secret-2026',
+  resave:            false,
+  saveUninitialized: false,
+  store: new MySQLStore({
+    pool,
+    clearExpired:  true,
+    checkExpirationInterval: 900000, // 15 分钟检查一次过期
+    ttl:           86400,            // session 有效期 1 天
+    createTable:    false,            // 表已手动创建
+    tableName:     'sessions',
+  }),
+  cookie: {
+    httpOnly: true,
+    maxAge:   86400 * 1000, // 1 天
+  },
+}));
+
+// ================================================================
+// BodyParser（放在 session 之后）
+// ================================================================
 const upload = multer({ dest: 'uploads/', limits: { fileSize: 50 * 1024 * 1024 } });
 app.use(express.json({ limit: '20mb' }));
 app.use(express.static('public'));
+
+// ================================================================
+// 工具函数：MD5 哈希
+// ================================================================
+function md5(str) {
+  return crypto.createHash('md5').update(str).digest('hex');
+}
+
+// ================================================================
+// 认证中间件：保护需要登录的 API
+// ================================================================
+function requireAuth(req, res, next) {
+  if (!req.session?.userId) {
+    return res.status(401).json({ error: '请先登录' });
+  }
+  next();
+}
+
+// ================================================================
+// 管理员中间件
+// ================================================================
+function requireAdmin(req, res, next) {
+  if (!req.session?.isAdmin) {
+    return res.status(403).json({ error: '需要管理员权限' });
+  }
+  next();
+}
 
 const jobs = new Map();
 const agentAJobs = new Map(); // 提前声明，与 jobs 同级，避免顶部 TTL 清理用 global 绕行
@@ -3073,6 +3144,170 @@ app.get('/api/agent-a/download/:jobId', (req, res) => {
   res.setHeader('Content-Disposition', 'attachment; filename*=UTF-8\'\'annotated-script-' + Date.now() + '.txt');
   res.send('Agent A 批注版剧本\n生成时间：' + new Date().toLocaleString('zh-CN') + '\n\n' + job.finalResult);
 });
+
+// ================================================================
+// 认证 & 账号管理 API
+// ================================================================
+
+// POST /api/auth/login
+app.post('/api/auth/login', async (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) {
+    return res.status(400).json({ error: '账号和密码不能为空' });
+  }
+  if (username.length > 8) {
+    return res.status(400).json({ error: '账号长度不能超过8位' });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ error: '密码长度不能少于6位' });
+  }
+  try {
+    const [rows] = await pool.query(
+      'SELECT id, username, is_admin FROM users WHERE username=? AND password=? AND is_deleted=0',
+      [username, md5(password)]
+    );
+    if (rows.length === 0) {
+      return res.status(401).json({ error: '账号或密码错误' });
+    }
+    const user = rows[0];
+    req.session.userId   = user.id;
+    req.session.username = user.username;
+    req.session.isAdmin  = user.is_admin === 1;
+    req.session.save(err => {
+      if (err) return res.status(500).json({ error: 'Session 保存失败' });
+      res.json({ ok: true, username: user.username, isAdmin: !!user.is_admin });
+    });
+  } catch (err) {
+    console.error('[/api/auth/login]', err);
+    res.status(500).json({ error: '登录失败：' + err.message });
+  }
+});
+
+// POST /api/auth/logout
+app.post('/api/auth/logout', (req, res) => {
+  req.session.destroy(err => {
+    if (err) return res.status(500).json({ error: '退出失败' });
+    res.json({ ok: true });
+  });
+});
+
+// GET /api/auth/me — 获取当前登录用户信息
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  res.json({ username: req.session.username, isAdmin: !!req.session.isAdmin });
+});
+
+// POST /api/auth/change-password — 修改当前用户密码
+app.post('/api/auth/change-password', requireAuth, async (req, res) => {
+  const { oldPassword, newPassword } = req.body || {};
+  if (!oldPassword || !newPassword) {
+    return res.status(400).json({ error: '旧密码和新密码不能为空' });
+  }
+  if (newPassword.length < 6) {
+    return res.status(400).json({ error: '新密码长度不能少于6位' });
+  }
+  try {
+    // 验证旧密码
+    const [rows] = await pool.query(
+      'SELECT id FROM users WHERE id=? AND password=? AND is_deleted=0',
+      [req.session.userId, md5(oldPassword)]
+    );
+    if (rows.length === 0) {
+      return res.status(401).json({ error: '旧密码错误' });
+    }
+    // 更新新密码
+    await pool.query('UPDATE users SET password=? WHERE id=?', [md5(newPassword), req.session.userId]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[/api/auth/change-password]', err);
+    res.status(500).json({ error: '修改密码失败：' + err.message });
+  }
+});
+
+// ================================================================
+// 管理员 API：账号增删改查（仅 admin 可操作）
+// ================================================================
+
+// GET /api/admin/users — 列表（排除已删除，软屏蔽敏感字段）
+app.get('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT id, username, is_admin, created_at, is_deleted FROM users ORDER BY created_at ASC'
+    );
+    res.json({ users: rows });
+  } catch (err) {
+    console.error('[/api/admin/users]', err);
+    res.status(500).json({ error: '获取账号列表失败' });
+  }
+});
+
+// POST /api/admin/users — 新增账号（admin 本身不可新建）
+app.post('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {
+  const { username, password, isAdmin } = req.body || {};
+  if (!username || !password) {
+    return res.status(400).json({ error: '账号和密码不能为空' });
+  }
+  if (username.length > 8) {
+    return res.status(400).json({ error: '账号长度不能超过8位' });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ error: '密码长度不能少于6位' });
+  }
+  try {
+    // 检查用户名唯一
+    const [exist] = await pool.query('SELECT id FROM users WHERE username=? AND is_deleted=0', [username]);
+    if (exist.length > 0) {
+      return res.status(409).json({ error: '账号已存在' });
+    }
+    // 不允许通过接口创建 admin 身份，只能是普通用户
+    await pool.query(
+      'INSERT INTO users (username, password, is_admin) VALUES (?, ?, 0)',
+      [username, md5(password)]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[/api/admin/users POST]', err);
+    res.status(500).json({ error: '创建账号失败' });
+  }
+});
+
+// PUT /api/admin/users/:id — 修改账号（仅密码，账号名不可改）
+app.put('/api/admin/users/:id', requireAuth, requireAdmin, async (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  const { password } = req.body || {};
+  if (!password) return res.status(400).json({ error: '密码不能为空' });
+  if (password.length < 6) return res.status(400).json({ error: '密码长度不能少于6位' });
+  try {
+    // 检查目标存在且未删除
+    const [rows] = await pool.query('SELECT id FROM users WHERE id=? AND is_deleted=0', [userId]);
+    if (rows.length === 0) return res.status(404).json({ error: '账号不存在' });
+    await pool.query('UPDATE users SET password=? WHERE id=?', [md5(password), userId]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[/api/admin/users PUT]', err);
+    res.status(500).json({ error: '修改失败' });
+  }
+});
+
+// DELETE /api/admin/users/:id — 软删除
+app.delete('/api/admin/users/:id', requireAuth, requireAdmin, async (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  if (userId === req.session.userId) {
+    return res.status(400).json({ error: '不能删除自己' });
+  }
+  try {
+    const [rows] = await pool.query('SELECT id FROM users WHERE id=? AND is_deleted=0', [userId]);
+    if (rows.length === 0) return res.status(404).json({ error: '账号不存在' });
+    await pool.query('UPDATE users SET is_deleted=1 WHERE id=?', [userId]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[/api/admin/users DELETE]', err);
+    res.status(500).json({ error: '删除失败' });
+  }
+});
+
+// ================================================================
+// 原有业务路由（保持不变）
+// ================================================================
 
 if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
 if (!fs.existsSync('prompts')) fs.mkdirSync('prompts');

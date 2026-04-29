@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>运营后台 - 视频提示词生成工具</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system,'PingFang SC','Microsoft YaHei',sans-serif; background:#0f1117; color:#e0e0e0; min-height:100vh; display:flex; }
+.sidebar { width:220px; min-height:100vh; background:#12141c; border-right:1px solid #2a2d38; display:flex; flex-direction:column; flex-shrink:0; }
+.sidebar-logo { padding:20px 16px; border-bottom:1px solid #2a2d38; text-align:center; }
+.sidebar-logo h2 { font-size:16px; font-weight:700; color:#fff; }
+.sidebar-logo p { font-size:11px; color:#555; margin-top:2px; }
+.sidebar-nav { flex:1; padding:12px 8px; }
+.nav-item { display:flex; align-items:center; gap:10px; padding:11px 14px; border-radius:8px; font-size:13px; color:#888; cursor:pointer; transition:all .15s; user-select:none; margin-bottom:4px; }
+.nav-item:hover { background:#1a1d27; color:#ccc; }
+.nav-item.active { background:rgba(45,90,240,0.15); color:#93b4ff; font-weight:600; }
+.nav-section-label { font-size:10px; color:#444; padding:12px 14px 4px; text-transform:uppercase; letter-spacing:.5px; }
+.main { flex:1; display:flex; flex-direction:column; min-width:0; overflow:hidden; }
+.topbar { height:56px; background:#12141c; border-bottom:1px solid #2a2d38; display:flex; align-items:center; justify-content:flex-end; padding:0 20px; gap:12px; position:relative; }
+.topbar-user { display:flex; align-items:center; gap:8px; cursor:pointer; padding:6px 12px; border-radius:8px; transition:background .15s; user-select:none; position:relative; }
+.topbar-user:hover { background:#1a1d27; }
+.user-avatar { width:28px; height:28px; border-radius:50%; background:#2d5af0; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; color:#fff; }
+.user-name { font-size:13px; color:#ccc; }
+.user-role { font-size:10px; padding:1px 6px; border-radius:10px; background:rgba(45,90,240,0.2); color:#93b4ff; }
+.user-role.admin { background:rgba(245,158,11,0.2); color:#fcd34d; }
+.dropdown-arrow { color:#555; font-size:10px; }
+.dropdown-menu { position:absolute; top:calc(100% + 4px); right:0; background:#1a1d27; border:1px solid #2a2d38; border-radius:10px; padding:6px; min-width:160px; box-shadow:0 8px 24px rgba(0,0,0,0.4); display:none; z-index:100; }
+.dropdown-menu.show { display:block; }
+.dropdown-item { display:flex; align-items:center; gap:8px; padding:9px 12px; border-radius:6px; font-size:13px; color:#ccc; cursor:pointer; transition:background .1s; }
+.dropdown-item:hover { background:#252830; }
+.dropdown-item.danger { color:#f87171; }
+.dropdown-item.danger:hover { background:rgba(239,68,68,0.1); }
+.dropdown-divider { height:1px; background:#2a2d38; margin:4px 0; }
+.content { flex:1; overflow-y:auto; }
+.content::-webkit-scrollbar { width:6px; }
+.content::-webkit-scrollbar-thumb { background:#333; border-radius:3px; }
+.page-section { display:none; }
+.page-section.active { display:block; }
+.page-content { max-width:960px; margin:0 auto; padding:20px 24px 40px; }
+.page-title { font-size:20px; font-weight:700; color:#fff; margin-bottom:4px; }
+.page-subtitle { font-size:12px; color:#666; margin-bottom:20px; }
+.card { background:#1a1d27; border:1px solid #2a2d38; border-radius:12px; padding:20px; margin-bottom:16px; }
+.card-title { font-size:14px; font-weight:600; color:#ccc; margin-bottom:12px; display:flex; align-items:center; gap:8px; }
+.card-title .step { background:#2d5af0; color:#fff; font-size:11px; padding:2px 8px; border-radius:10px; font-weight:600; }
+label { display:block; font-size:12px; color:#999; margin-bottom:4px; font-weight:500; }
+input,select,textarea { width:100%; padding:10px 12px; border:1px solid #2a2d38; border-radius:8px; background:#12141c; color:#e0e0e0; font-size:13px; font-family:inherit; }
+input:focus,select:focus,textarea:focus { outline:none; border-color:#2d5af0; }
+textarea { resize:vertical; min-height:80px; }
+.form-row { display:flex; gap:10px; margin-bottom:10px; }
+.form-row>div { flex:1; }
+.btn { padding:10px 20px; border:none; border-radius:8px; font-size:13px; font-weight:600; cursor:pointer; transition:all .15s; font-family:inherit; }
+.btn-primary { background:#2d5af0; color:#fff; }
+.btn-primary:hover { background:#3b66f5; }
+.btn-primary:disabled { background:#333; color:#666; cursor:not-allowed; }
+.btn-success { background:#22c55e; color:#fff; }
+.btn-success:hover { background:#16a34a; }
+.btn-outline { background:transparent; border:1px solid #2a2d38; color:#ccc; }
+.btn-outline:hover { background:#252830; }
+.btn-danger { background:#ef4444; color:#fff; }
+.btn-danger:hover { background:#dc2626; }
+.btn-sm { padding:6px 14px; font-size:12px; }
+.btn-group { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+.file-upload { border:2px dashed #2a2d38; border-radius:10px; padding:24px; text-align:center; cursor:pointer; transition:all .2s; position:relative; }
+.file-upload:hover { border-color:#2d5af0; background:rgba(45,90,240,0.05); }
+.file-upload input { position:absolute; inset:0; opacity:0; cursor:pointer; }
+.file-upload .icon { font-size:28px; margin-bottom:6px; }
+.file-upload .hint { font-size:12px; color:#888; }
+.file-name { font-size:12px; color:#22c55e; margin-top:6px; }
+.result-box { background:#12141c; border:1px solid #2a2d38; border-radius:8px; padding:16px; max-height:500px; overflow-y:auto; font-size:13px; line-height:1.7; white-space:pre-wrap; word-break:break-all; }
+.result-box::-webkit-scrollbar { width:6px; }
+.result-box::-webkit-scrollbar-thumb { background:#333; border-radius:3px; }
+.status { padding:10px 14px; border-radius:8px; font-size:13px; margin:10px 0; }
+.status-info { background:rgba(45,90,240,0.1); border:1px solid rgba(45,90,240,0.3); color:#93b4ff; }
+.status-success { background:rgba(34,197,94,0.1); border:1px solid rgba(34,197,94,0.3); color:#86efac; }
+.status-error { background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.3); color:#fca5a5; }
+.status-loading { background:rgba(245,158,11,0.1); border:1px solid rgba(245,158,11,0.3); color:#fcd34d; }
+.progress-bar { background:#12141c; border-radius:6px; height:6px; overflow:hidden; margin:8px 0; }
+.progress-fill { height:100%; background:linear-gradient(90deg,#2d5af0,#22c55e); transition:width .3s; border-radius:6px; }
+.progress-text { font-size:12px; color:#888; }
+.progress-item { display:flex; align-items:center; gap:8px; padding:6px 0; font-size:12px; }
+.progress-item .dot { width:8px; height:8px; border-radius:50%; }
+.dot-pending { background:#444; }
+.dot-processing { background:#f59e0b; animation:pulse 1s infinite; }
+.dot-done { background:#22c55e; }
+.dot-error { background:#ef4444; }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+.check-bar { display:flex; flex-wrap:wrap; gap:6px; padding:8px 10px; background:rgba(34,197,94,0.06); border:1px solid rgba(34,197,94,0.15); border-radius:6px; margin:6px 0; }
+.check-item { font-size:11px; padding:2px 8px; border-radius:4px; }
+.check-ok { background:rgba(34,197,94,0.12); color:#86efac; }
+.check-warn { background:rgba(245,158,11,0.12); color:#fcd34d; }
+.check-fail { background:rgba(239,68,68,0.12); color:#fca5a5; }
+.hidden { display:none !important; }
+.mode-selector { display:flex; gap:8px; margin-bottom:20px; border-radius:10px; background:#1a1d27; padding:4px; }
+.mode-btn { flex:1; padding:12px 8px; border:none; background:transparent; color:#888; border-radius:8px; cursor:pointer; font-size:13px; font-weight:500; transition:all .2s; }
+.mode-btn.active { background:#2d5af0; color:#fff; }
+.mode-btn:hover:not(.active) { color:#ccc; background:#252830; }
+.flow-steps { display:flex; align-items:center; gap:4px; margin-bottom:16px; font-size:11px; color:#666; flex-wrap:wrap; }
+.flow-step { padding:4px 10px; border-radius:12px; background:#1a1d27; border:1px solid #2a2d38; }
+.flow-step.active { background:#2d5af0; color:#fff; border-color:#2d5af0; }
+.flow-step.completed { background:rgba(34,197,94,0.15); color:#86efac; border-color:rgba(34,197,94,0.3); }
+.flow-arrow { color:#444; }
+.sub-steps { display:flex; gap:3px; margin-top:4px; flex-wrap:wrap; }
+.sub-step { font-size:10px; padding:1px 6px; border-radius:3px; }
+.sub-step-done { background:rgba(34,197,94,0.12); color:#86efac; }
+.sub-step-active { background:rgba(245,158,11,0.12); color:#fcd34d; }
+.sub-step-pending { background:rgba(255,255,255,0.04); color:#555; }
+.error-banner { background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); border-radius:8px; padding:10px 14px; margin-bottom:10px; font-size:13px; color:#fca5a5; display:flex; align-items:center; gap:8px; }
+.error-banner strong { color:#f87171; }
+.editable-result { background:#12141c; border:1px solid #2a2d38; border-radius:8px; padding:16px; min-height:200px; max-height:500px; overflow-y:auto; font-size:13px; line-height:1.7; white-space:pre-wrap; word-break:break-all; }
+.editable-result:focus { outline:none; border-color:#2d5af0; }
+.scene-list { max-height:200px; overflow-y:auto; }
+.scene-item { display:flex; justify-content:space-between; align-items:center; padding:6px 10px; border-radius:6px; font-size:12px; margin-bottom:4px; }
+.scene-item:nth-child(odd) { background:rgba(255,255,255,0.02); }
+.scene-tag { font-size:10px; padding:2px 6px; border-radius:4px; font-weight:600; }
+.tag-wenxi { background:rgba(59,130,246,0.2); color:#93c5fd; }
+.tag-wuxi { background:rgba(239,68,68,0.2); color:#fca5a5; }
+.tag-mixed { background:rgba(168,85,247,0.2); color:#d8b4fe; }
+.user-table-wrap { overflow-x:auto; }
+.user-table { width:100%; border-collapse:collapse; }
+.user-table th,.user-table td { padding:10px 14px; text-align:left; font-size:13px; border-bottom:1px solid #2a2d38; }
+.user-table th { color:#888; font-weight:500; background:#1a1d27; }
+.user-table td { color:#ccc; }
+.user-table tr:hover td { background:rgba(255,255,255,0.02); }
+.badge { font-size:10px; padding:2px 7px; border-radius:10px; font-weight:600; }
+.badge-admin { background:rgba(245,158,11,0.15); color:#fcd34d; }
+.badge-normal { background:rgba(45,90,240,0.12); color:#93b4ff; }
+.badge-deleted { background:rgba(255,255,255,0.06); color:#555; }
+.modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index:200; display:none; }
+.modal-overlay.show { display:flex; }
+.modal { background:#1a1d27; border:1px solid #2a2d38; border-radius:14px; padding:28px; width:400px; max-width:90vw; }
+.modal h3 { font-size:16px; font-weight:600; color:#fff; margin-bottom:20px; }
+.modal .form-group { margin-bottom:16px; }
+.modal .btn-group { margin-top:20px; }
+.modal .btn { flex:1; }
+</style>
+</head>
+<body>
+
+<!-- 侧边栏 -->
+<div class="sidebar">
+  <div class="sidebar-logo"><h2>🎬 提示词工具</h2><p>运营后台</p></div>
+  <nav class="sidebar-nav">
+    <div class="nav-section-label">功能菜单</div>
+    <div class="nav-item active" id="navTool" onclick="switchPage('tool')">✨ 生成提示词</div>
+    <div class="nav-item" id="navAccount" onclick="switchPage('account')">👤 账号管理</div>
+  </nav>
+</div>
+
+<!-- 主内容 -->
+<div class="main">
+  <div class="topbar">
+    <div class="topbar-user" onclick="toggleDropdown()">
+      <div class="user-avatar" id="userAvatar">?</div>
+      <span class="user-name" id="userName">加载中...</span>
+      <span class="user-role" id="userRole">普通用户</span>
+      <span class="dropdown-arrow">▼</span>
+    </div>
+    <div class="dropdown-menu" id="userDropdown">
+      <div class="dropdown-item" onclick="openChangePassword()">🔑 修改密码</div>
+      <div class="dropdown-divider"></div>
+      <div class="dropdown-item danger" onclick="doLogout()">🚪 退出登录</div>
+    </div>
+  </div>
+
+  <div class="content">
+
+    <!-- 生成提示词 -->
+    <div class="page-section active" id="pageTool">
+      <div class="page-content">
+        <h1 style="font-size:22px;font-weight:600;color:#fff;margin-bottom:4px;">✨ 生成提示词</h1>
+        <p style="font-size:13px;color:#888;margin-bottom:16px;">Agent A 剧本分析 → Agent C 分镜提示词</p>
+
+        <div class="mode-selector">
+          <button class="mode-btn active" onclick="switchMode('agentA')" id="modeAgentA">原始剧本 → 全流程</button>
+          <button class="mode-btn" onclick="switchMode('direct')" id="modeDirect">批注剧本 → 直接生成</button>
+        </div>
+
+        <div class="card">
+          <div class="card-title">⚙️ API 设置</div>
+          <div class="form-row">
+            <div>
+              <label>API 类型</label>
+              <select id="apiType" onchange="onApiTypeChange()">
+                <option value="anthropic">Anthropic Claude</option>
+                <option value="openai">OpenAI 兼容</option>
+                <option value="gemini">Google Gemini</option>
+                <option value="minimax">MiniMax</option>
+              </select>
+            </div>
+            <div>
+              <label>模型</label>
+              <select id="model" onchange="onModelChange()">
+                <optgroup label="Anthropic Claude" id="modelGroupClaude"><option value="claude-sonnet-4-6">Claude Sonnet 4.6（推荐）</option><option value="claude-opus-4-6">Claude Opus 4.6</option><option value="claude-haiku-4-5-20251001">Claude Haiku 4.5</option></optgroup>
+                <optgroup label="OpenAI 兼容" id="modelGroupOai" style="display:none"><option value="deepseek-chat">DeepSeek Chat</option><option value="deepseek-reasoner">DeepSeek Reasoner</option></optgroup>
+                <optgroup label="Google Gemini" id="modelGroupGemini" style="display:none"><option value="gemini-2.5-pro">Gemini 2.5 Pro</option><option value="gemini-2.5-flash">Gemini 2.5 Flash</option><option value="gemini-2.0-flash">Gemini 2.0 Flash</option></optgroup>
+                <optgroup label="MiniMax" id="modelGroupMiniMax" style="display:none"><option value="MiniMax-M2">MiniMax-M2（推荐）</option><option value="MiniMax-M2.7-highspeed">MiniMax-M2.7-highspeed</option><option value="MiniMax-M2.5">MiniMax-M2.5</option><option value="MiniMax-M2.7">MiniMax-M2.7</option></optgroup>
+                <option value="_custom">自定义...</option>
+              </select>
+              <input type="text" id="modelCustom" class="hidden" placeholder="输入自定义模型名" style="margin-top:6px">
+            </div>
+          </div>
+          <div class="form-row">
+            <div style="flex:2"><label>API Key</label><input type="password" id="apiKey" placeholder="sk-..."></div>
+            <div><label>API URL（留空用默认）</label><input type="text" id="apiUrl" placeholder="留空=官方 / 或填中转站"></div>
+          </div>
+        </div>
+
+        <div id="agentAFlow">
+          <div class="flow-steps" id="agentASteps">
+            <span class="flow-step active" id="stepUpload">① 上传剧本</span>
+            <span class="flow-arrow">→</span>
+            <span class="flow-step hidden" id="stepMapping">② 映射预览</span>
+            <span class="flow-arrow hidden" id="arrowAfterMapping">→</span>
+            <span class="flow-step" id="stepSoulCard">② 剧魂定位卡</span>
+            <span class="flow-arrow" id="arrowAfterSoulCard">→</span>
+            <span class="flow-step" id="stepAnnotate">③ 逐场景批注</span>
+            <span class="flow-arrow">→</span>
+            <span class="flow-step" id="stepGenerate">④ 提示词生成</span>
+          </div>
+
+          <div class="card" id="agentA_upload">
+            <div class="card-title"><span class="step">步骤 1</span> 上传原始剧本</div>
+            <div class="file-upload" id="agentAFileZone">
+              <input type="file" id="agentAFileInput" accept=".txt,.docx" onchange="handleAgentAUpload(this)">
+              <div class="icon">📄</div><div>点击或拖拽上传原始剧本</div>
+              <div class="hint">支持 .txt / .docx</div>
+              <div class="file-name hidden" id="agentAFileName"></div>
+            </div>
+            <div id="agentAUploadStatus"></div>
+            <div class="hidden" id="analysisModeWrap" style="margin-top:12px;">
+              <label>分析模式</label>
+              <div style="display:flex;gap:6px;margin-top:4px;">
+                <button class="btn btn-sm active" id="modeAI" onclick="setAnalysisMode('ai')" style="flex:1;padding:10px 8px;border:1px solid #2a2d38;border-radius:8px;font-size:12px;background:#2d5af0;color:#fff;cursor:pointer;">🤖 AI 自动分析</button>
+                <button class="btn btn-sm" id="modeDirector" onclick="setAnalysisMode('director')" style="flex:1;padding:10px 8px;border:1px solid #2a2d38;border-radius:8px;font-size:12px;background:transparent;color:#888;cursor:pointer;">🎬 导演讲戏</button>
+              </div>
+              <p style="font-size:11px;color:#666;margin-top:6px;" id="analysisModeHint">AI 将用剧作方法论自动分析剧本，生成批注</p>
+            </div>
+            <div class="hidden" id="directorNotesWrap" style="margin-top:12px;">
+              <label>导演讲戏文本</label>
+              <div style="display:flex;gap:6px;margin-bottom:6px;">
+                <button class="btn btn-outline btn-sm" onclick="document.getElementById('directorFileInput').click()" style="font-size:11px;">📄 上传 .txt</button>
+                <input type="file" id="directorFileInput" accept=".txt" style="display:none;" onchange="handleDirectorFileUpload(this)">
+                <span class="file-name hidden" id="directorFileName" style="font-size:11px;align-self:center;"></span>
+              </div>
+              <textarea id="directorNotesInput" rows="5" placeholder="粘贴导演讲戏文本..."></textarea>
+              <div id="directorNotesStatus"></div>
+            </div>
+            <div class="btn-group"><button class="btn btn-primary" onclick="handleStep1Next()" id="btnStep1Next" disabled>生成剧魂定位卡</button></div>
+          </div>
+
+          <div class="card hidden" id="agentA_mapping">
+            <div class="card-title"><span class="step">步骤 2</span> 讲戏映射预览</div>
+            <div id="mappingStatus"></div>
+            <div id="mappingSummary" class="hidden" style="margin-bottom:10px;"></div>
+            <div id="mappingList" style="max-height:500px;overflow-y:auto;"></div>
+            <div class="btn-group hidden" id="mappingActions">
+              <button class="btn btn-success" onclick="confirmMapping()">✓ 确认映射，开始批注</button>
+              <button class="btn btn-outline" onclick="redoMapping()">重新映射</button>
+            </div>
+          </div>
+
+          <div class="card hidden" id="agentA_soulCard">
+            <div class="card-title"><span class="step">步骤 2</span> 剧魂定位卡</div>
+            <div id="soulCardStatus"></div>
+            <div class="editable-result" id="soulCardContent" contenteditable="true" style="display:none"></div>
+            <p style="font-size:11px;color:#666;margin-top:6px;" id="soulCardEditHint" class="hidden">可直接编辑定位卡内容</p>
+            <div class="btn-group" id="soulCardActions">
+              <button class="btn btn-success" onclick="confirmSoulCard()">✓ 确认，开始批注</button>
+              <button class="btn btn-outline" onclick="regenerateSoulCard()">重新生成</button>
+            </div>
+          </div>
+
+          <div class="card hidden" id="agentA_annotate">
+            <div class="card-title"><span class="step">步骤 3</span> 逐场景批注</div>
+            <div id="annotateStatus"></div>
+            <div class="result-box hidden" id="annotateResult" style="max-height:400px;"></div>
+            <div class="btn-group hidden" id="annotateActions">
+              <button class="btn btn-success" onclick="proceedToGenerate()">→ 进入提示词生成</button>
+              <button class="btn btn-outline btn-sm" onclick="downloadAnnotation()">下载批注剧本</button>
+              <button class="btn btn-outline btn-sm" onclick="copyAnnotation()">复制批注内容</button>
+            </div>
+          </div>
+
+          <div class="card hidden" id="agentA_generate">
+            <div class="card-title"><span class="step">步骤 4</span> 提示词生成</div>
+            <div id="agentA_sceneInfo"></div>
+            <div style="margin-top:10px;"><label>服化道卡（可选）</label><textarea id="costumeCardA" rows="3" placeholder="如有 Agent B 的服化道卡输出，粘贴在此处..."></textarea></div>
+            <div class="btn-group"><button class="btn btn-primary" onclick="startGenerateFromAgentA()" id="btnGenerateA">开始生成提示词</button></div>
+            <div id="agentA_generateProgress" class="hidden"></div>
+            <div id="agentA_generateResult" class="hidden"></div>
+          </div>
+        </div>
+
+        <div id="directFlow" class="hidden">
+          <div class="card">
+            <div class="card-title">📤 上传批注版剧本</div>
+            <div class="file-upload">
+              <input type="file" id="directFileInput" accept=".txt,.docx" onchange="handleDirectUpload(this)">
+              <div class="icon">📄</div><div>点击或拖拽上传批注版剧本</div>
+              <div class="hint">支持 .txt / .docx（需包含"场景X-X"格式标题）</div>
+              <div class="file-name hidden" id="directFileName"></div>
+            </div>
+            <div id="directUploadStatus"></div>
+          </div>
+          <div class="card hidden" id="directScenes">
+            <div class="card-title">📋 识别到的场景</div>
+            <div class="scene-list" id="directSceneList"></div>
+          </div>
+          <div class="card hidden" id="directGenerate">
+            <div class="card-title">🎭 服化道卡 & 生成</div>
+            <label>服化道卡（可选）</label>
+            <textarea id="costumeCardD" rows="3" placeholder="如有 Agent B 的服化道卡输出，粘贴在此处..."></textarea>
+            <div class="btn-group"><button class="btn btn-primary" onclick="startDirectGenerate()" id="btnGenerateD">开始生成提示词</button></div>
+          </div>
+          <div class="card hidden" id="directProgress"><div class="card-title">⏳ 生成进度</div><div id="directProgressList"></div></div>
+          <div class="card hidden" id="directResults"><div class="card-title">📝 生成结果</div><div id="directResultList"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 账号管理 -->
+    <div class="page-section" id="pageAccount">
+      <div class="page-content">
+        <div class="page-title">👤 账号管理</div>
+        <p class="page-subtitle">管理员可增删改账号，普通用户仅可修改自己的密码</p>
+
+        <div class="card">
+          <div class="card-title">🔑 修改我的密码</div>
+          <div class="form-row">
+            <div><label>旧密码</label><input type="password" id="oldPwd" placeholder="请输入当前密码" minlength="6"></div>
+            <div><label>新密码</label><input type="password" id="newPwd" placeholder="新密码（至少6位）" minlength="6"></div>
+          </div>
+          <div id="pwdChangeStatus"></div>
+          <div class="btn-group"><button class="btn btn-primary btn-sm" onclick="changeMyPassword()">确认修改</button></div>
+        </div>
+
+        <div class="card" id="adminUserPanel" style="display:none;">
+          <div class="card-title">🛡️ 后台账号管理 <span style="font-size:11px;color:#555;font-weight:400;">（仅管理员可见）</span></div>
+          <div class="btn-group" style="margin-bottom:14px;"><button class="btn btn-primary btn-sm" onclick="openAddUserModal()">+ 新增账号</button></div>
+          <div id="userTableStatus"></div>
+          <div class="user-table-wrap">
+            <table class="user-table">
+              <thead><tr><th>账号</th><th>角色</th><th>创建时间</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody id="userTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /.content -->
+</div><!-- /.main -->
+
+<!-- 弹窗 -->
+<div class="modal-overlay" id="modalChangePwd">
+  <div class="modal">
+    <h3>🔑 修改我的密码</h3>
+    <div class="form-group"><label>旧密码</label><input type="password" id="modalOldPwd" placeholder="请输入当前密码" minlength="6"></div>
+    <div class="form-group"><label>新密码 <span style="color:#555;font-weight:400;">（至少6位）</span></label><input type="password" id="modalNewPwd" placeholder="输入新密码" minlength="6"></div>
+    <div class="form-group"><label>确认新密码</label><input type="password" id="modalNewPwd2" placeholder="再次输入新密码" minlength="6"></div>
+    <div id="modalChangePwdStatus"></div>
+    <div class="btn-group">
+      <button class="btn btn-primary" onclick="doChangePassword()">确认修改</button>
+      <button class="btn btn-outline" onclick="closeModal('modalChangePwd')">取消</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modalAddUser">
+  <div class="modal">
+    <h3>➕ 新增账号</h3>
+    <div class="form-group"><label>账号 <span style="color:#555;font-weight:400;">（最多8位，不允许重复）</span></label><input type="text" id="addUsername" placeholder="输入账号" maxlength="8" autocomplete="off"></div>
+    <div class="form-group"><label>密码 <span style="color:#555;font-weight:400;">（至少6位）</span></label><input type="password" id="addPassword" placeholder="输入密码" minlength="6"></div>
+    <div id="modalAddUserStatus"></div>
+    <div class="btn-group">
+      <button class="btn btn-success" onclick="doAddUser()">确认创建</button>
+      <button class="btn btn-outline" onclick="closeModal('modalAddUser')">取消</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modalResetPwd">
+  <div class="modal">
+    <h3>🔑 重置账号密码</h3>
+    <p style="font-size:13px;color:#888;margin-bottom:16px;">正在重置账号 <strong id="resetPwdUsername" style="color:#fff;"></strong> 的密码</p>
+    <div class="form-group"><label>新密码 <span style="color:#555;font-weight:400;">（至少6位）</span></label><input type="password" id="resetPassword" placeholder="输入新密码" minlength="6"></div>
+    <div id="modalResetPwdStatus"></div>
+    <div class="btn-group">
+      <button class="btn btn-success" onclick="doResetPassword()">确认重置</button>
+      <button class="btn btn-outline" onclick="closeModal('modalResetPwd')">取消</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentUser = null, currentPage = 'tool', currentMode = 'agentA', currentResetUserId = null;
+let agentAState = { scriptText:null, soulCard:null, annotatedScript:null, scenes:null, annotateJobId:null, generateJobId:null, analysisMode:'ai', directorNotes:null, mappedSegments:null, sceneOptions:null };
+let directState = { scenes:null, jobId:null };
+
+(async function init() {
+  try {
+    const res = await fetch('/api/auth/me');
+    if (!res.ok) { window.location.href = '/login.html'; return; }
+    currentUser = await res.json();
+    renderUserInfo(); loadUserList();
+  } catch (_) { window.location.href = '/login.html'; }
+})();
+
+function renderUserInfo() {
+  document.getElementById('userName').textContent = currentUser.username;
+  document.getElementById('userAvatar').textContent = currentUser.username.charAt(0).toUpperCase();
+  const el = document.getElementById('userRole');
+  if (currentUser.isAdmin) {
+    el.textContent = '管理员'; el.className = 'user-role admin';
+    document.getElementById('adminUserPanel').style.display = 'block';
+  } else {
+    el.textContent = '普通用户'; el.className = 'user-role';
+  }
+}
+
+function switchPage(page) {
+  currentPage = page;
+  document.getElementById('pageTool').classList.toggle('active', page==='tool');
+  document.getElementById('pageAccount').classList.toggle('active', page==='account');
+  document.getElementById('navTool').classList.toggle('active', page==='tool');
+  document.getElementById('navAccount').classList.toggle('active', page==='account');
+  if (page==='account') loadUserList();
+}
+
+function toggleDropdown() { document.getElementById('userDropdown').classList.toggle('show'); }
+document.addEventListener('click', e => { if (!e.target.closest('.topbar-user')) document.getElementById('userDropdown').classList.remove('show'); });
+
+async function doLogout() { await fetch('/api/auth/logout', {method:'POST'}); window.location.href = '/login.html'; }
+
+function openChangePassword() {
+  document.getElementById('userDropdown').classList.remove('show');
+  ['modalOldPwd','modalNewPwd','modalNewPwd2'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('modalChangePwdStatus').innerHTML = '';
+  document.getElementById('modalChangePwd').classList.add('show');
+}
+function closeModal(id) { document.getElementById(id).classList.remove('show'); }
+
+async function doChangePassword() {
+  const oldPwd = document.getElementById('modalOldPwd').value;
+  const newPwd = document.getElementById('modalNewPwd').value;
+  const newPwd2 = document.getElementById('modalNewPwd2').value;
+  const el = document.getElementById('modalChangePwdStatus');
+  if (!oldPwd || !newPwd) { el.innerHTML = '<div class="status status-error">请填写所有字段</div>'; return; }
+  if (newPwd.length < 6) { el.innerHTML = '<div class="status status-error">新密码长度不能少于6位</div>'; return; }
+  if (newPwd !== newPwd2) { el.innerHTML = '<div class="status status-error">两次新密码不一致</div>'; return; }
+  try {
+    const res = await fetch('/api/auth/change-password', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({oldPassword:oldPwd,newPassword:newPwd})});
+    const d = await res.json();
+    if (!res.ok) { el.innerHTML = '<div class="status status-error">'+(d.error||'修改失败')+'</div>'; return; }
+    el.innerHTML = '<div class="status status-success">密码修改成功！</div>';
+    setTimeout(() => closeModal('modalChangePwd'), 800);
+  } catch (_) { el.innerHTML = '<div class="status status-error">网络异常</div>'; }
+}
+
+async function loadUserList() {
+  if (!currentUser?.isAdmin) return;
+  const se = document.getElementById('userTableStatus');
+  const tb = document.getElementById('userTableBody');
+  se.innerHTML = '<div class="status status-info">加载中...</div>';
+  try {
+    const res = await fetch('/api/admin/users');
+    if (!res.ok) { se.innerHTML = '<div class="status status-error">加载失败</div>'; return; }
+    const d = await res.json();
+    se.innerHTML = '';
+    const users = d.users || [];
+    if (!users.length) { tb.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#555;">暂无账号</td></tr>'; return; }
+    tb.innerHTML = users.map(u => {
+      const del = !!u.is_deleted, admin = !!u.is_admin;
+      return '<tr><td>'+u.username+'</td><td><span class="badge '+(admin?'badge-admin':'badge-normal')+'">'+(admin?'管理员':'普通用户')+'</span></td><td>'+((u.created_at||'').slice(0,16).replace('T',' '))+'</td><td>'+(del?'<span class="badge badge-deleted">已删除</span>':'<span class="check-item check-ok">正常</span>')+'</td><td style="display:flex;gap:6px;align-items:center;">'+(del?'':'<button class="btn btn-outline btn-sm" onclick="openResetPwdModal('+u.id+',\''+u.username+'\')">改密</button>')+(!del&&u.id!==currentUser?.userId?' <button class="btn btn-danger btn-sm" onclick="deleteUser('+u.id+')">删除</button>':'')+(del?' <span style="font-size:11px;color:#555;">已软删除</span>':'')+'</td></tr>';
+    }).join('');
+  } catch (_) { se.innerHTML = '<div class="status status-error">加载失败</div>'; }
+}
+
+function openAddUserModal() { ['addUsername','addPassword'].forEach(id=>document.getElementById(id).value=''); document.getElementById('modalAddUserStatus').innerHTML=''; document.getElementById('modalAddUser').classList.add('show'); }
+async function doAddUser() {
+  const u = document.getElementById('addUsername').value.trim(), p = document.getElementById('addPassword').value;
+  const el = document.getElementById('modalAddUserStatus');
+  if (!u) { el.innerHTML='<div class="status status-error">账号不能为空</div>'; return; }
+  if (u.length>8) { el.innerHTML='<div class="status status-error">账号长度不能超过8位</div>'; return; }
+  if (p.length<6) { el.innerHTML='<div class="status status-error">密码长度不能少于6位</div>'; return; }
+  try {
+    const res = await fetch('/api/admin/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});
+    const d = await res.json();
+    if (!res.ok) { el.innerHTML='<div class="status status-error">'+(d.error||'创建失败')+'</div>'; return; }
+    el.innerHTML='<div class="status status-success">账号创建成功！</div>';
+    setTimeout(()=>{closeModal('modalAddUser');loadUserList();},800);
+  } catch(_) { el.innerHTML='<div class="status status-error">网络异常</div>'; }
+}
+
+function openResetPwdModal(id, username) {
+  currentResetUserId = id;
+  document.getElementById('resetPwdUsername').textContent = username;
+  document.getElementById('resetPassword').value = '';
+  document.getElementById('modalResetPwdStatus').innerHTML = '';
+  document.getElementById('modalResetPwd').classList.add('show');
+}
+async function doResetPassword() {
+  const p = document.getElementById('resetPassword').value;
+  const el = document.getElementById('modalResetPwdStatus');
+  if (p.length<6) { el.innerHTML='<div class="status status-error">密码长度不能少于6位</div>'; return; }
+  try {
+    const res = await fetch('/api/admin/users/'+currentResetUserId,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p})});
+    const d = await res.json();
+    if (!res.ok) { el.innerHTML='<div class="status status-error">'+(d.error||'修改失败')+'</div>'; return; }
+    el.innerHTML='<div class="status status-success">密码重置成功！</div>';
+    setTimeout(()=>{closeModal('modalResetPwd');loadUserList();},800);
+  } catch(_) { el.innerHTML='<div class="status status-error">网络异常</div>'; }
+}
+
+async function deleteUser(id) {
+  if (!confirm('确定要删除该账号吗？')) return;
+  try {
+    const res = await fetch('/api/admin/users/'+id,{method:'DELETE'});
+    const d = await res.json();
+    if (!res.ok) { alert(d.error||'删除失败'); return; }
+    loadUserList();
+  } catch(_) { alert('网络异常'); }
+}
+
+async function changeMyPassword() {
+  const oldPwd = document.getElementById('oldPwd').value;
+  const newPwd = document.getElementById('newPwd').value;
+  const el = document.getElementById('pwdChangeStatus');
+  if (!oldPwd || !newPwd) { el.innerHTML='<div class="status status-error">请填写所有字段</div>'; return; }
+  if (newPwd.length<6) { el.innerHTML='<div class="status status-error">新密码长度不能少于6位</div>'; return; }
+  try {
+    const res = await fetch('/api/auth/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({oldPassword:oldPwd,newPassword:newPwd})});
+    const d = await res.json();
+    if (!res.ok) { el.innerHTML='<div class="status status-error">'+(d.error||'修改失败')+'</div>'; return; }
+    el.innerHTML='<div class="status status-success">密码修改成功！</div>';
+    document.getElementById('oldPwd').value='';
+    document.getElementById('newPwd').value='';
+  } catch(_) { el.innerHTML='<div class="status status-error">网络异常</div>'; }
+}
+</script>
+<script src="/tool.js?v=1"></script>
+</body>
+</html>
