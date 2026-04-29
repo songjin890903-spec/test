@@ -6,7 +6,6 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const session = require('express-session');
-const MySQLStore = require('connect-mysql')(session);
 const mysql = require('mysql2/promise');
 
 const app = express();
@@ -35,14 +34,6 @@ app.use(session({
   secret:            process.env.SESSION_SECRET || 'prompt-tool-session-secret-2026',
   resave:            false,
   saveUninitialized: false,
-  store: new MySQLStore({
-    pool,
-    clearExpired:  true,
-    checkExpirationInterval: 900000, // 15 分钟检查一次过期
-    ttl:           86400,            // session 有效期 1 天
-    createTable:    false,            // 表已手动创建
-    tableName:     'sessions',
-  }),
   cookie: {
     httpOnly: true,
     maxAge:   86400 * 1000, // 1 天
