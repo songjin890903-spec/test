@@ -377,22 +377,25 @@ function getMissingClauses(d, cleanOutput) {
 async function repairMissingDialogues(missing, existingOutput, systemPrompt, config) {
   console.log(`⚠️ 发现 ${missing.length} 条台词遗漏，自动补写中...`);
   const cleanExisting = existingOutput.replace(/<analysis>[\s\S]*?<\/analysis>/g, '');
-  let repairMsg = `以下台词或OS独白在刚才的输出中被遗漏，必须补写进对应片段的C部分镜号叙事里。\n`;
-  repairMsg += `请在原输出基础上找到对应片段，将遗漏台词以"角色OS：引号原文"或"角色（状态）：引号原文"格式写进对应镜号叙事正文，输出补写后的完整内容。\n\n`;
-  repairMsg += `【遗漏台词清单】\n`;
+  let repairMsg = `任务：将以下遗漏台词补写进【C】部分的对应镜号叙事中。\n`;
+  repairMsg += `规则：\n`;
+  repairMsg += `1. 必须逐字使用台词原文，不得修改、概括或省略。\n`;
+  repairMsg += `2. 补写位置：找到最靠近该台词上下文的镜号，在其叙事里加入"角色：台词原文"（OS用"角色OS：台词"，独白用"角色（状态）：台词"）。\n`;
+  repairMsg += `3. 输出格式：只输出【A】到【F】的完整片段，不要任何解释、确认、规划说明。\n`;
+  repairMsg += `4. 自检：输出前确认——每一条遗漏台词都必须出现在【C】的某个镜号叙事里，否则你输出的内容会被直接丢弃。\n\n`;
+  repairMsg += `【遗漏台词清单（必须全部出现在输出中）】\n`;
   missing.forEach((d, i) => {
     const colonIdx = d.indexOf('：');
     const charPrefix = colonIdx >= 0 ? d.substring(0, colonIdx + 1) : '';
     const missingClauses = getMissingClauses(d, cleanExisting);
     if (missingClauses.length > 0 && missingClauses.length < d.split(/(?<=[？！。])/g).filter(s => s.trim().length >= 4).length) {
-      // 部分子句缺失：只报告缺失的那几句，避免模型把已有部分重复写入
-      repairMsg += `遗漏${i + 1}：${charPrefix}${missingClauses.join('')}（注：此台词其余句已存在，只需补入这几句）\n`;
+      repairMsg += `遗漏${i + 1}（部分子句）：${charPrefix}${missingClauses.join('')}\n`;
     } else {
       repairMsg += `遗漏${i + 1}：${d}\n`;
     }
   });
-  repairMsg += `\n【原输出】\n${existingOutput}\n\n`;
-  repairMsg += `请直接输出补全后的完整提示词，格式与原输出完全一致，不要任何解释。`;
+  repairMsg += `\n【原输出（请在此基础上补写，保留所有现有镜号不变）】\n${existingOutput}\n\n`;
+  repairMsg += `请直接输出补写后的完整片段（【A】到【F】），不要任何解释或确认语句。`;
   return await callAPI(systemPrompt, repairMsg, config);
 }
 
@@ -1753,13 +1756,28 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
 
     let segOutput = await callAPI(effectiveSystemPrompt, segPrompt, config);
 
-    // 台词核验 + 补写
+    // 台词核验 + 补写（最多补写1次·避免无限循环）
     const segDialogues = (seg.shots || []).map(s => s.dialogue).filter(Boolean);
     if (segDialogues.length > 0) {
-      const missing = verifyDialogues(segDialogues, segOutput);
-      if (missing.length > 0) {
-        segOutput = await repairMissingDialogues(missing, segOutput, effectiveSystemPrompt, config);
-        console.log(`✓ ${seg.id} 台词补写完成`);
+      const missing1 = verifyDialogues(segDialogues, segOutput);
+      if (missing1.length > 0) {
+        console.log(`⚠️ ${seg.id} 第1次补写：${missing1.length} 条遗漏`);
+        let repaired = await repairMissingDialogues(missing1, segOutput, effectiveSystemPrompt, config);
+        // 复验：补写后仍然遗漏的·强制注入到 C 部分末尾
+        const missing2 = verifyDialogues(segDialogues, repaired);
+        if (missing2.length > 0) {
+          console.warn(`⚠️ ${seg.id} 补写后仍有 ${missing2.length} 条遗漏，强制注入...`);
+          // 把仍然遗漏的台词文本直接追加到 C 部分末尾（简单兜底）
+          const injectText = missing2.map(d => {
+            const ci = d.indexOf('：');
+            return ci >= 0 ? d : `（台词）：${d}`;
+          }).join('\n');
+          repaired = repaired.replace(/(?=【D】)/, `\n${injectText}\n`);
+          console.warn(`⚠️ ${seg.id} 强制注入 ${missing2.length} 条台词（不再调 API）`);
+        } else {
+          console.log(`✓ ${seg.id} 台词补写后核验通过`);
+        }
+        segOutput = repaired;
       } else {
         console.log(`✓ ${seg.id} 台词核验通过`);
       }
@@ -2027,13 +2045,26 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
       // 整体再验一次
       const finalMissing2 = verifyDialogues(dialogues, outputs.join('\n'));
       if (finalMissing2.length > 0) {
-        console.warn(`⚠️ ${scene.id} 智能补写后仍有 ${finalMissing2.length} 条遗漏·最后兜底到末尾片段`);
-        // 最后的最后·还漏的再全塞到末尾
+        console.warn(`⚠️ ${scene.id} 智能补写后仍有 ${finalMissing2.length} 条遗漏，兜底到末尾片段补写（第2次）...`);
         const lastIdx = outputs.findLastIndex((o, i) => !o.startsWith('[') && i === outputs.length - 1);
         const fallbackIdx = lastIdx >= 0 ? lastIdx : outputs.length - 1;
         if (fallbackIdx >= 0 && !outputs[fallbackIdx].startsWith('[')) {
           try {
-            outputs[fallbackIdx] = await repairMissingDialogues(finalMissing2, outputs[fallbackIdx], systemPrompt, config);
+            const repaired2 = await repairMissingDialogues(finalMissing2, outputs[fallbackIdx], systemPrompt, config);
+            // 复验第2次补写
+            const finalMissing3 = verifyDialogues(dialogues, repaired2);
+            if (finalMissing3.length > 0) {
+              console.warn(`⚠️ ${scene.id} 兜底补写后仍有 ${finalMissing3.length} 条遗漏，不再补写，强制注入...`);
+              // 强制注入到末尾片段的 C 部分
+              const injectText = finalMissing3.map(d => {
+                const ci = d.indexOf('：');
+                return ci >= 0 ? d : `（台词）：${d}`;
+              }).join('\n');
+              outputs[fallbackIdx] = repaired2.replace(/(?=【D】)/, `\n${injectText}\n`);
+            } else {
+              outputs[fallbackIdx] = repaired2;
+              console.log(`✓ ${scene.id} 兜底补写后核验通过`);
+            }
           } catch (err) {
             console.warn(`⚠️ 兜底补写失败：${err.message}`);
           }
