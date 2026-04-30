@@ -1729,6 +1729,31 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
       console.log(`✓ ${seg.id} 时长 ${actualTotal}s，合格`);
     }
 
+    // ── 单镜号台词时长检测 ─────────────────────────────────
+    // 检测每个镜头的台词是否能在分配的时长内完成
+    // 格式：镜1 2s · [中景] · dialogue:"赵一铭：怎么会..."
+    const SHOT_DIALOGUE_RE = /镜(\d+)\s+(\d+(?:\.\d+)?)\s*s[^·]*·[^·]*·dialogue:"([^"]+)"/g;
+    const shotDurationWarnings = [];
+    let match;
+    while ((match = SHOT_DIALOGUE_RE.exec(segOutput)) !== null) {
+      const shotNum = match[1];
+      const shotDur = parseFloat(match[2]);
+      const dialogue = match[3];
+      const minDur = calcMinDuration(dialogue);
+      if (minDur > shotDur) {
+        const warnMsg = `⚠️ ${seg.id} 镜${shotNum}：台词需≥${minDur}秒，分配${shotDur}秒，不足！`;
+        shotDurationWarnings.push(warnMsg);
+      }
+    }
+    if (shotDurationWarnings.length > 0) {
+      console.warn(`⚠️ ${seg.id} 单镜号台词时长不足警告：`);
+      shotDurationWarnings.forEach(w => console.warn(`   ${w}`));
+    }
+
+    // ── 字数统计（保留【A】+【B】+【C】+【D】+【E】+【F】<=1800检测）─────────
+    const segCharCount = segOutput.replace(/<analysis>[\s\S]*?<\/analysis>/g, '').trim().length;
+    console.log(`📊 ${seg.id} 字数统计：${segCharCount}字 ${segCharCount <= 1800 ? '✅' : '❌ 超标'}`);
+
     // ✨ 首片段完成后提取 A 部分，广播给后续所有片段
     if (si === 0 && referenceAResolve) {
       const extractedA = extractASection(segOutput);
@@ -1916,6 +1941,32 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
     }
   }
 
+  // ── 全场景单镜号台词时长扫描 ─────────────────────────────────
+  // 检测所有片段的所有镜头是否存在台词时长超过分配时长的问题
+  const allShotsWarning = [];
+  for (let segIdx = 0; segIdx < outputs.length; segIdx++) {
+    const segText = outputs[segIdx];
+    const segId = plan.segments[segIdx]?.id || `片段${segIdx + 1}`;
+    const SHOT_DIALOGUE_RE_SCAN = /镜(\d+)\s+(\d+(?:\.\d+)?)\s*s[^·]*·[^·]*·dialogue:"([^"]+)"/g;
+    let match;
+    while ((match = SHOT_DIALOGUE_RE_SCAN.exec(segText)) !== null) {
+      const shotNum = match[1];
+      const shotDur = parseFloat(match[2]);
+      const dialogue = match[3];
+      const minDur = calcMinDuration(dialogue);
+      if (minDur > shotDur) {
+        allShotsWarning.push(`${segId} 镜${shotNum}：台词"${dialogue.slice(0, 15)}..."需${minDur}秒，分配${shotDur}秒（差${(minDur - shotDur).toFixed(1)}秒）`);
+      }
+    }
+  }
+  if (allShotsWarning.length > 0) {
+    console.warn(`\n⚠️ ⚠️ ⚠️ ${scene.id} 全场景镜头时长不足汇总（共${allShotsWarning.length}处）：`);
+    allShotsWarning.forEach(w => console.warn(`   ${w}`));
+    console.warn(`请调整该场景的片段分配或增加片段数量！\n`);
+  } else {
+    console.log(`✓ ${scene.id} 全场景镜头时长检测通过`);
+  }
+
   // 重新生成 finalOutput（补写可能修改了 outputs）
   const finalOutput = scenePlanBlock + '\n\n' + outputs.join('\n\n');
 
@@ -2067,6 +2118,28 @@ async function processSceneSingleShot(scene, costumeCard, config, job, sceneInde
       console.log(`✓ ${scene.id} 单次模式片段${si + 1}：时长 ${segTotal}s，合格`);
     }
   }
+
+  // ── 单次模式单镜号台词时长检测 ─────────────────────────────────
+  const ssShotWarnings = [];
+  const SHOT_DIALOGUE_RE_SS = /镜(\d+)\s+(\d+(?:\.\d+)?)\s*s[^·]*·[^·]*·dialogue:"([^"]+)"/g;
+  let match;
+  while ((match = SHOT_DIALOGUE_RE_SS.exec(result)) !== null) {
+    const shotNum = match[1];
+    const shotDur = parseFloat(match[2]);
+    const dialogue = match[3];
+    const minDur = calcMinDuration(dialogue);
+    if (minDur > shotDur) {
+      ssShotWarnings.push(`镜${shotNum}：台词"${dialogue.slice(0, 15)}..."需${minDur}秒，分配${shotDur}秒`);
+    }
+  }
+  if (ssShotWarnings.length > 0) {
+    console.warn(`⚠️ ${scene.id} 单次模式单镜号台词时长不足：`);
+    ssShotWarnings.forEach(w => console.warn(`   ${w}`));
+  }
+
+  // ── 字数统计（保留【A】+【B】+【C】+【D】+【E】+【F】<=1800检测）─────────
+  const ssCharCount = result.replace(/<analysis>[\s\S]*?<\/analysis>/g, '').trim().length;
+  console.log(`📊 ${scene.id} 单次模式字数统计：${ssCharCount}字 ${ssCharCount <= 1800 ? '✅' : '❌ 超标'}`);
 
   return result;
 }
