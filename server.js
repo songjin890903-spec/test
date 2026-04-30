@@ -36,6 +36,28 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000).unref?.();
 
+// ============================================================
+// 过滤 AI 输出中的分批提示信息（问题2修复）
+// 只保留【A】【B】【C】【D】【E】【F】片段内容，过滤掉"【第X批完...】"等提示
+// ============================================================
+function filterBatchPrompts(text) {
+  if (!text) return text;
+  
+  // 匹配【第X批完 · 已输出X/X片段 · 回复"继续"输出剩余X片段】这类整行
+  text = text.replace(/^【第[^】]*批完[^】]*】\s*$/gm, '');
+  
+  // 过滤掉包含"回复继续"、"已输出"等关键词的提示行
+  text = text.replace(/^.*(?:回复.*继续|已输出.*片段|第.*批.*).*$/gm, '');
+  
+  // 过滤掉单独的"继续"提示行
+  text = text.replace(/^继续\s*$/gm, '');
+  
+  // 清理多余空行
+  text = text.replace(/\n{3,}/g, '\n\n');
+  
+  return text.trim();
+}
+
 // 场景类型对应的镜头数规则（集中定义，validatePlan 只接收 limits 对象）
 // 新判断逻辑：只有纯武戏才走 wuxi 规则，其他（含混合场景）全部走 wenxi 规则
 const SCENE_RULES = {
@@ -1767,6 +1789,9 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
       referenceAResolve = null;
     }
 
+    // ── 过滤分批提示信息 ─────────────────────────────────
+    segOutput = filterBatchPrompts(segOutput);
+
     return segOutput;
   }
 
@@ -1968,7 +1993,10 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
   }
 
   // 重新生成 finalOutput（补写可能修改了 outputs）
-  const finalOutput = scenePlanBlock + '\n\n' + outputs.join('\n\n');
+  let finalOutput = scenePlanBlock + '\n\n' + outputs.join('\n\n');
+
+  // ── 过滤分批提示信息 ─────────────────────────────────
+  finalOutput = filterBatchPrompts(finalOutput);
 
   // ── 全场景导演指令核验 ─────────────────────────────────
   // 检查导演的关键动作词是否出现在最终输出中
@@ -2140,6 +2168,9 @@ async function processSceneSingleShot(scene, costumeCard, config, job, sceneInde
   // ── 字数统计（保留【A】+【B】+【C】+【D】+【E】+【F】<=1800检测）─────────
   const ssCharCount = result.replace(/<analysis>[\s\S]*?<\/analysis>/g, '').trim().length;
   console.log(`📊 ${scene.id} 单次模式字数统计：${ssCharCount}字 ${ssCharCount <= 1800 ? '✅' : '❌ 超标'}`);
+
+  // ── 过滤分批提示信息 ─────────────────────────────────
+  result = filterBatchPrompts(result);
 
   return result;
 }
