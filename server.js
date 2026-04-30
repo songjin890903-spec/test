@@ -1075,7 +1075,27 @@ function validatePlan(plan, dialogues, limits, minSegments, relaxed = false) {
     }
   }
 
-  // 台词分配完整性
+  // 台词分配完整性 + 重复检测
+  // 先检测台词重复：同一句台词不能出现在多个片段
+  const dialogueSegmentCount = new Map(); // dialogue文本 → 出现次数
+  for (const seg of plan.segments) {
+    for (const shot of (seg.shots || [])) {
+      if (shot.dialogue && shot.dialogue.trim()) {
+        const key = shot.dialogue.trim();
+        dialogueSegmentCount.set(key, (dialogueSegmentCount.get(key) || 0) + 1);
+      }
+    }
+  }
+  const duplicateDialogues = [];
+  for (const [dlg, count] of dialogueSegmentCount) {
+    if (count > 1) {
+      duplicateDialogues.push(`台词"${dlg.slice(0, 20)}..."出现在${count}个片段，必须只出现在1个片段`);
+    }
+  }
+  if (duplicateDialogues.length > 0) {
+    errors.push(`⚠️ 台词重复错误：${duplicateDialogues.join('；')}`);
+  }
+
   const allPlanned = plan.segments
     .flatMap(s => s.shots || [])
     .map(s => (s.dialogue || '').replace(QUOTE_STRIP_RE, ''))
@@ -1331,7 +1351,13 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
   p += `1. C部分镜号数量、时长必须与规划完全一致，不得增删。\n`;
   p += `1a. 每个段落以 [景别] 开头：${scene.sceneType === 'wuxi' ? '武戏用英文如 [大特写 (Extreme Close-up)]' : '文戏用中文如 [近景]·[中近景]·[过肩]'}，后接复合运镜指令，焦段写在镜号头部或描述里。\n`;
   p += `1b. ⚠️ 每个镜号必须三层缝合：第一层叙事+第二层摄影机运动（有情绪/力的理由）+第三层（）物理反馈，缺一不可。空壳镜号（只有说话没有运镜没有物理反馈）禁止输出。\n`;
-  p += `2. 含台词的镜号必须在叙事正文里写出台词原文（动作状态+冒号+引号）。\n`;
+  p += `2. ⚠️⚠️⚠️ 台词铁律（最高优先级）：\n`;
+  p += `   · 台词必须逐字使用剧本原文，不允许任何修改、替换、概括或改写。\n`;
+  p += `   · 禁止修改台词内容："XX说：'xxx'" → 必须原样使用冒号后的引号内原文。\n`;
+  p += `   · 禁止概括台词："XX说了句关心的话" → 禁止，必须写出完整台词原文。\n`;
+  p += `   · 禁止添加台词："XX说了'xxx'" → 禁止，剧本没有的台词不能添加。\n`;
+  p += `   · 含台词的镜号必须在叙事正文里写出台词原文（动作状态+冒号+引号）。\n`;
+  p += `   · 违反此规则=致命错误，输出作废。\n`;
   p += `3. OS独白必须以"角色OS：「引号原文」"格式写进对应镜号叙事正文。\n`;
   p += `3b. 声画分离镜号（task含"声画分离"）：写纯画面叙事，开头注明"【声画分离】XX的OS/台词继续"，不重复写台词原文。画面按【文戏专项规则】规则十-补的三层优先级选择（①听者反应 ②说话者细节 ③空景环境）。\n`;
   p += `3d. 反应镜号（task含"反应"）：纯画面·写听者的表情变化、身体反应、沉默。不写台词。让对话有呼吸感，不要从一句台词直接跳到下一句。\n`;
