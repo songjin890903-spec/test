@@ -1175,6 +1175,19 @@ function forceInjectMissingDialogues(plan, dialogues) {
     .map(s => (s.dialogue || '').replace(QUOTE_STRIP_RE, ''))
     .join('\n'));
 
+  // 统计 plan 中每个锚点出现的次数（用于处理重复台词）
+  const anchorCountInPlan = new Map();
+  for (const seg of plan.segments) {
+    for (const shot of (seg.shots || [])) {
+      if (!shot.dialogue) continue;
+      const contentNorm = normalizeDialogueForMatch(stripDirectorNote(shot.dialogue));
+      const anchor = contentNorm.slice(0, 10);
+      if (anchor) {
+        anchorCountInPlan.set(anchor, (anchorCountInPlan.get(anchor) || 0) + 1);
+      }
+    }
+  }
+
   for (let segIdx = 0; segIdx < plan.segments.length; segIdx++) {
     const seg = plan.segments[segIdx];
     const shotTexts = normalizeDialogueForMatch((seg.shots || []).map(s => (s.dialogue || '').replace(QUOTE_STRIP_RE, '')).join('\n'));
@@ -1237,16 +1250,26 @@ function forceInjectMissingDialogues(plan, dialogues) {
     const charName = colonIdx >= 0 ? d.substring(0, colonIdx) : '';
     const content = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d).trim();
 
-    // ─── 防重复兜底：注入前在全 plan 再扫一遍，如果已在任意片段出现就跳过 ───
-    // 这是第二道保险（第一道是上面的归一化检测）。只要 LLM 把台词写成任何
-    // 认得出来的形式——完整句/拆句/加破折号/换行——就不会重复注入。
-    // 匹配前先剥离演员指导括号，保证与 validatePlan 标准一致
+    // ─── 防重复兜底：注入前在全 plan 再扫一遍 ───
+    // 如果相同锚点在 plan 中出现的次数 >= 台词列表中相同锚点的出现次数，则跳过
+    // 这样可以处理重复台词的情况（台词1和台词5都是相同的VO台词）
     const contentNorm = normalizeDialogueForMatch(stripDirectorNote(content));
     const anchor = contentNorm.slice(0, 10);
-    if (anchor && plannedConcat.includes(anchor)) {
-      // 已经在 plan 里了·说明这条其实没遗漏·跳过注入
-      console.log(`   ⊘ 台词${dIdx + 1} 已在 plan 中（跳过重复注入）：${d.slice(0, 40)}`);
-      continue;
+    if (anchor && anchorCountInPlan.has(anchor)) {
+      // 统计台词列表中相同锚点出现的次数
+      let dialogueAnchorCount = 0;
+      for (let i = 0; i < dialogues.length; i++) {
+        const d2 = dialogues[i];
+        const cIdx = d2.indexOf('：');
+        const c2 = stripDirectorNote((cIdx >= 0 ? d2.substring(cIdx + 1) : d2)).trim();
+        const a2 = normalizeDialogueForMatch(c2).slice(0, 10);
+        if (a2 === anchor) dialogueAnchorCount++;
+      }
+      const planCount = anchorCountInPlan.get(anchor);
+      if (planCount >= dialogueAnchorCount) {
+        console.log(`   ⊘ 台词${dIdx + 1} 已在 plan 中（相同锚点 ${planCount} >= 台词中 ${dialogueAnchorCount}，跳过）：${d.slice(0, 40)}`);
+        continue;
+      }
     }
 
     const minDur = Math.min(Math.max(calcMinDuration(d), 2), 5);
