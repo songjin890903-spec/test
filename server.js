@@ -294,17 +294,6 @@ function extractDialogues(sceneContent) {
     if (charPart.length > 15 || !contentPart || contentPart.length < 2) continue;
     // excludeKeywords 只检查角色名部分，不污染台词内容
     if (excludeKeywords.some(kw => charPart.includes(kw))) continue;
-    // ② 台词行判断：冒号后内容必须包含引号（"说话"的标志），否则是动作描述行
-    // 例："虞敏（人名条：虞敏）在贴门神，回头笑着看向陈浩" → 剥离字幕条后
-    //   lineNoSubtitle = "虞敏在贴门神，回头笑着看向陈浩"，冒号已不存在，不会进入这里
-    // 但若原始行是"虞敏：在贴门神，回头笑着看向陈浩"（无引号）→ 动作行，跳过
-    // 台词行必须有引号或以"说""道"等说话动词+引号形式出现
-    const hasQuote = /["「『\u201C\u201D]/.test(contentPart);
-    if (!hasQuote) {
-      // 无引号 → 可能是动作行，额外检查是否含说话动词（有则还是台词）
-      const hasSpeakVerb = /(?:说|道|开口|呼喊|低声|大喊|问|答|回答|怒吼)["「『\u201C]/.test(contentPart);
-      if (!hasSpeakVerb) continue; // 纯动作行，跳过
-    }
     dialogues.push(trimmed);
   }
   // 日志：显示提取到的 VO/旁白台词（方便排查漏台词问题）
