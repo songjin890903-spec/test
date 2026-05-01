@@ -1239,31 +1239,18 @@ function forceInjectMissingDialogues(plan, dialogues) {
   if (missingIndices.length === 0) return plan;
   console.log(`📌 程序强制注入 ${missingIndices.length} 条遗漏台词...`);
 
-  // 3. 对每条遗漏台词，找最近邻已分配台词所在片段，追加新镜号
+  // 3. 对每条遗漏台词，找最近邻已分配台词所在片段
+  //    ★ 关键修复：插入到"正确位置"而非追加到片段末尾，保证台词顺序
   for (const dIdx of missingIndices) {
-    let targetSegIdx = -1;
-    for (let i = dIdx - 1; i >= 0; i--) {
-      if (segForDialogue.has(i)) { targetSegIdx = segForDialogue.get(i); break; }
-    }
-    if (targetSegIdx === -1) {
-      for (let i = dIdx + 1; i < dialogues.length; i++) {
-        if (segForDialogue.has(i)) { targetSegIdx = segForDialogue.get(i); break; }
-      }
-    }
-    if (targetSegIdx === -1) targetSegIdx = plan.segments.length - 1;
-
     const d = dialogues[dIdx];
     const colonIdx = d.indexOf('：');
     const charName = colonIdx >= 0 ? d.substring(0, colonIdx) : '';
     const content = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d).trim();
 
-    // ─── 防重复兜底：注入前在全 plan 再扫一遍 ───
-    // 如果相同锚点在 plan 中出现的次数 >= 台词列表中相同锚点的出现次数，则跳过
-    // 这样可以处理重复台词的情况（台词1和台词5都是相同的VO台词）
+    // ─── 防重复兜底 ───
     const contentNorm = normalizeDialogueForMatch(stripDirectorNote(content));
     const anchor = contentNorm.slice(0, 10);
     if (anchor && anchorCountInPlan.has(anchor)) {
-      // 统计台词列表中相同锚点出现的次数
       let dialogueAnchorCount = 0;
       for (let i = 0; i < dialogues.length; i++) {
         const d2 = dialogues[i];
@@ -1279,18 +1266,69 @@ function forceInjectMissingDialogues(plan, dialogues) {
       }
     }
 
-    const minDur = Math.min(Math.max(calcMinDuration(d), 2), 5);
+    // 找目标片段：优先用前邻台词，其次用后邻台词
+    let targetSegIdx = -1;
+    for (let i = dIdx - 1; i >= 0; i--) {
+      if (segForDialogue.has(i)) { targetSegIdx = segForDialogue.get(i); break; }
+    }
+    if (targetSegIdx === -1) {
+      for (let i = dIdx + 1; i < dialogues.length; i++) {
+        if (segForDialogue.has(i)) { targetSegIdx = segForDialogue.get(i); break; }
+      }
+    }
+    if (targetSegIdx === -1) targetSegIdx = plan.segments.length - 1;
+
     const seg = plan.segments[targetSegIdx];
     if (!seg.shots) seg.shots = [];
-    seg.shots.push({
-      num: seg.shots.length + 1,
+
+    // ─── ★ 关键：按正确顺序插入而非追加到末尾 ───
+    // 找到"前邻台词"在片段内的镜号索引，在其后插入
+    // 如果前邻台词在其他片段，则追加到片段末尾
+    const minDur = Math.min(Math.max(calcMinDuration(d), 2), 5);
+    const newShot = {
+      num: 1, // 临时占位，后面统一重排
       duration: minDur,
       shot_type: '[中近景]',
       task: `${charName ? charName + '说台词' : '台词'}·听者基线反应`,
       dialogue: content
-    });
+    };
+
+    // 找前邻台词在目标片段内的镜号索引
+    let insertAfter = -1;
+    for (let prevDIdx = dIdx - 1; prevDIdx >= 0; prevDIdx--) {
+      if (segForDialogue.get(prevDIdx) === targetSegIdx) {
+        // 前邻台词也在目标片段内 → 找到它在片段中的位置
+        // 遍历片段镜号，找到含有该台词内容的镜号
+        for (let sIdx = 0; sIdx < seg.shots.length; sIdx++) {
+          const s = seg.shots[sIdx];
+          if (!s.dialogue) continue;
+          const prevContent = stripDirectorNote(s.dialogue).trim();
+          const prevD = dialogues[prevDIdx];
+          const prevColonIdx = prevD.indexOf('：');
+          const prevContentFull = stripDirectorNote(
+            (prevColonIdx >= 0 ? prevD.substring(prevColonIdx + 1) : prevD)
+          ).trim();
+          if (normalizeDialogueForMatch(prevContent).includes(normalizeDialogueForMatch(prevContentFull.slice(0, 10)))) {
+            insertAfter = sIdx;
+            break;
+          }
+        }
+        break;
+      }
+    }
+
+    if (insertAfter >= 0) {
+      // 插入到前邻台词之后（注意：后续镜号会往后挤，顺序正确）
+      seg.shots.splice(insertAfter + 1, 0, newShot);
+    } else {
+      // 前邻台词不在目标片段内，追加到片段末尾
+      seg.shots.push(newShot);
+    }
+
+    // 统一重排所有镜号 num
+    seg.shots.forEach((s, i) => { s.num = i + 1; });
     segForDialogue.set(dIdx, targetSegIdx);
-    console.log(`   → 台词${dIdx + 1} 注入到 ${seg.id}：${d.slice(0, 40)}`);
+    console.log(`   → 台词${dIdx + 1} 注入到 ${seg.id}（位置：${insertAfter >= 0 ? '台词' + (dIdx) + '之后' : '片段末尾'}）：${d.slice(0, 40)}`);
   }
 
   return plan;
@@ -1519,9 +1557,12 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
 
   if (segDialogues.length > 0) {
     p += `【本片段台词清单（★标注台词全部必须逐字出现在C部分正文，不得遗漏）】\n`;
+    // ★ 按剧本顺序逐条列出，并在 prompt 里明确"禁止打乱顺序"
     segDialogues.forEach((d, i) => { p += `★[台词${i + 1}] ${d}\n`; });
     p += `⚠️ 共${segDialogues.length}条台词，写完C部分后逐条核对，有遗漏禁止输出。\n`;
-    p += `⚠️ 台词顺序铁律：本片段内镜号必须严格按照台词出现顺序排列，镜1先于镜2，镜2先于镜3...。禁止打乱台词顺序。\n\n`;
+    p += `⚠️ 台词顺序铁律：本片段内镜号必须严格按照上述顺序排列，写镜1时用台词1，写镜2时用台词2，禁止调换顺序或跨越顺序。\n`;
+    p += `   · 例如：如果台词顺序是「台词A → 台词B → 台词C」，则镜1对话A，镜2对B，镜3对C。\n`;
+    p += `   · 禁止出现"镜1写台词B·镜2写台词A"这样的打乱顺序写法。\n\n`;
   }
 
   // ── 场景全部台词背景参考（防止因上下文遗忘导致前几步内容缺失）──
