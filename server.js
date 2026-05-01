@@ -274,22 +274,37 @@ function extractDialogues(sceneContent) {
     '节点缺口', '补充方案', '身体反应', '心理状态', '情绪走向', '观众带走',
     '结构节点', '优先级', '作用', '补充', '内容', '方法论', '导演'
   ];
+  // 字幕条标注模式：（人名条：XXX）/ （字幕条：XXX）/ （字幕：XXX）等
+  // 这类标注是场记/技术标注，不是台词，需要先从行内剥离再判断
+  const SUBTITLE_TAG_RE = /（(?:人名条|字幕条|字幕|下字幕|人名|名条)：[^）]*）/g;
   const dialogues = [];
   for (const line of stripped.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed || trimmed === '【无特殊批注】') continue;
-    if (!trimmed.includes('：')) continue;
-    if (excludePrefixes.some(p => trimmed.startsWith(p))) {
+    // ① 先剥离字幕条标注，再判断是否是台词行
+    const lineNoSubtitle = trimmed.replace(SUBTITLE_TAG_RE, '').trim();
+    if (!lineNoSubtitle.includes('：')) continue;
+    if (excludePrefixes.some(p => lineNoSubtitle.startsWith(p))) {
       // 豁免（旁白）（画外音）（VO）——它们都是有效的OS/旁白台词行
-      if (!trimmed.startsWith('（旁白）') && !trimmed.startsWith('（画外音）') && !trimmed.startsWith('（VO）')) continue;
+      if (!lineNoSubtitle.startsWith('（旁白）') && !lineNoSubtitle.startsWith('（画外音）') && !lineNoSubtitle.startsWith('（VO）')) continue;
     }
-    const colonIdx = trimmed.indexOf('：');
-    const charPart = trimmed.substring(0, colonIdx);
-    const contentPart = trimmed.substring(colonIdx + 1).trim();
+    const colonIdx = lineNoSubtitle.indexOf('：');
+    const charPart = lineNoSubtitle.substring(0, colonIdx);
+    const contentPart = lineNoSubtitle.substring(colonIdx + 1).trim();
     if (charPart.length > 15 || !contentPart || contentPart.length < 2) continue;
     // excludeKeywords 只检查角色名部分，不污染台词内容
-    // 避免误过滤含"禁止""知道""内容"等词的正常台词
     if (excludeKeywords.some(kw => charPart.includes(kw))) continue;
+    // ② 台词行判断：冒号后内容必须包含引号（"说话"的标志），否则是动作描述行
+    // 例："虞敏（人名条：虞敏）在贴门神，回头笑着看向陈浩" → 剥离字幕条后
+    //   lineNoSubtitle = "虞敏在贴门神，回头笑着看向陈浩"，冒号已不存在，不会进入这里
+    // 但若原始行是"虞敏：在贴门神，回头笑着看向陈浩"（无引号）→ 动作行，跳过
+    // 台词行必须有引号或以"说""道"等说话动词+引号形式出现
+    const hasQuote = /["「『\u201C\u201D]/.test(contentPart);
+    if (!hasQuote) {
+      // 无引号 → 可能是动作行，额外检查是否含说话动词（有则还是台词）
+      const hasSpeakVerb = /(?:说|道|开口|呼喊|低声|大喊|问|答|回答|怒吼)["「『\u201C]/.test(contentPart);
+      if (!hasSpeakVerb) continue; // 纯动作行，跳过
+    }
     dialogues.push(trimmed);
   }
   // 日志：显示提取到的 VO/旁白台词（方便排查漏台词问题）
