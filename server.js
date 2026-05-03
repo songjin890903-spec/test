@@ -99,6 +99,59 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000).unref?.();
 
+// ============================================================
+// 过滤 AI 输出中的多余提示信息
+// 只保留【A】【B】【C】【D】【E】【F】片段内容，过滤掉"【第X批完...】"、规划总览等
+// ============================================================
+function filterBatchPrompts(text) {
+  if (!text) return text;
+
+  // 1. 匹配【第X批完 · 已输出X/X片段 · 回复"继续"输出剩余X片段】这类整行
+  text = text.replace(/^【第[^】]*批完[^】]*】\s*$/gm, '');
+
+  // 1b. 匹配【第X批完 · 已输出X/X片段 · 本场结束】或【第X批完 · 已输出X/X片段 · 本场全部输出完毕】
+  text = text.replace(/^【第\s*\d+\s*批完\s*·\s*已输出[\d／/]+[\d／/]*\s*片段\s*·\s*(?:本场结束|本场全部输出完毕|回复.*继续[^】]*)】\s*$/gm, '');
+
+  // 2. 过滤掉包含"回复继续"、"已输出"等关键词的提示行
+  text = text.replace(/^.*(?:回复.*继续|已输出.*片段|第.*批.*).*$/gm, '');
+
+  // 3. 过滤掉单独的"继续"提示行
+  text = text.replace(/^继续\s*$/gm, '');
+
+  // 4. 过滤补写台词的解释性段落（从"根据原输出"到下一个【片段】之前的内容）
+  // 注意：保留【片段X-X】标题行本身
+  text = text.replace(/^根据原输出[\s\S]*?(?=^【片段)/gm, '');
+
+  // 5. 过滤"以下是补写后的完整提示词"及其后续内容
+  text = text.replace(/^以下是补写后的完整提示词[\s\S]*?(?=^【)/gm, '');
+
+  // 6. 过滤其他补写台词的确认/步骤信息
+  text = text.replace(/^.*(?:好的，收到遗漏台词|好的，我将|收到遗漏台词|根据要求，将遗漏的台词|补写.*台词|遗漏.*补写|遗漏台词.*处理|作为.*的一部分).*$/gm, '');
+
+  // 7. 过滤规划确认信息
+  text = text.replace(/^.*(?:好的，收到规划|好的，我已收到|已收到规划要求|规划确认完毕).*$/gm, '');
+
+  // 8. 过滤场景分析、步骤描述等元信息
+  text = text.replace(/^.*(?:我将根据|开始处理|正在分析|分析完毕|处理完成|步骤.*如下).*$/gm, '');
+
+  // 9. 过滤掉【本场规划总览】整块
+  text = text.replace(/^【本场规划总览】[\s\S]*?(?=^【)/gm, '');
+
+  // 10. 过滤掉 <scene_plan>...</scene_plan> 块
+  text = text.replace(/<scene_plan>[\s\S]*?<\/scene_plan>/g, '');
+
+  // 11. 过滤掉包含"规划总览"、"场景规划"的独立行
+  text = text.replace(/^.*(?:规划总览|场景规划|片段规划).*$/gm, '');
+
+  // 12. 过滤掉【第X批完...】格式但前面可能有空格的变体
+  text = text.replace(/^\s*【第\s*\d+\s*批完[\s\S]*?】\s*$/gm, '');
+
+  // 13. 清理多余空行
+  text = text.replace(/\n{3,}/g, '\n\n');
+
+  return text.trim();
+}
+
 // 场景类型对应的镜头数规则（集中定义，validatePlan 只接收 limits 对象）
 // 新判断逻辑：只有纯武戏才走 wuxi 规则，其他（含混合场景）全部走 wenxi 规则
 const SCENE_RULES = {
@@ -290,21 +343,25 @@ function extractDialogues(sceneContent) {
     '节点缺口', '补充方案', '身体反应', '心理状态', '情绪走向', '观众带走',
     '结构节点', '优先级', '作用', '补充', '内容', '方法论', '导演'
   ];
+  // 字幕条标注模式：（人名条：XXX）/ （字幕条：XXX）/ （字幕：XXX）等
+  // 这类标注是场记/技术标注，不是台词，需要先从行内剥离再判断
+  const SUBTITLE_TAG_RE = /（(?:人名条|字幕条|字幕|下字幕|人名|名条)：[^）]*）/g;
   const dialogues = [];
   for (const line of stripped.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed || trimmed === '【无特殊批注】') continue;
-    if (!trimmed.includes('：')) continue;
-    if (excludePrefixes.some(p => trimmed.startsWith(p))) {
+    // ① 先剥离字幕条标注，再判断是否是台词行
+    const lineNoSubtitle = trimmed.replace(SUBTITLE_TAG_RE, '').trim();
+    if (!lineNoSubtitle.includes('：')) continue;
+    if (excludePrefixes.some(p => lineNoSubtitle.startsWith(p))) {
       // 豁免（旁白）（画外音）（VO）——它们都是有效的OS/旁白台词行
-      if (!trimmed.startsWith('（旁白）') && !trimmed.startsWith('（画外音）') && !trimmed.startsWith('（VO）')) continue;
+      if (!lineNoSubtitle.startsWith('（旁白）') && !lineNoSubtitle.startsWith('（画外音）') && !lineNoSubtitle.startsWith('（VO）')) continue;
     }
-    const colonIdx = trimmed.indexOf('：');
-    const charPart = trimmed.substring(0, colonIdx);
-    const contentPart = trimmed.substring(colonIdx + 1).trim();
+    const colonIdx = lineNoSubtitle.indexOf('：');
+    const charPart = lineNoSubtitle.substring(0, colonIdx);
+    const contentPart = lineNoSubtitle.substring(colonIdx + 1).trim();
     if (charPart.length > 15 || !contentPart || contentPart.length < 2) continue;
     // excludeKeywords 只检查角色名部分，不污染台词内容
-    // 避免误过滤含"禁止""知道""内容"等词的正常台词
     if (excludeKeywords.some(kw => charPart.includes(kw))) continue;
     dialogues.push(trimmed);
   }
@@ -393,22 +450,25 @@ function getMissingClauses(d, cleanOutput) {
 async function repairMissingDialogues(missing, existingOutput, systemPrompt, config) {
   console.log(`⚠️ 发现 ${missing.length} 条台词遗漏，自动补写中...`);
   const cleanExisting = existingOutput.replace(/<analysis>[\s\S]*?<\/analysis>/g, '');
-  let repairMsg = `以下台词或OS独白在刚才的输出中被遗漏，必须补写进对应片段的C部分镜号叙事里。\n`;
-  repairMsg += `请在原输出基础上找到对应片段，将遗漏台词以"角色OS：引号原文"或"角色（状态）：引号原文"格式写进对应镜号叙事正文，输出补写后的完整内容。\n\n`;
-  repairMsg += `【遗漏台词清单】\n`;
+  let repairMsg = `任务：将以下遗漏台词补写进【C】部分的对应镜号叙事中。\n`;
+  repairMsg += `规则：\n`;
+  repairMsg += `1. 必须逐字使用台词原文，不得修改、概括或省略。\n`;
+  repairMsg += `2. 补写位置：找到最靠近该台词上下文的镜号，在其叙事里加入"角色：台词原文"（OS用"角色OS：台词"，独白用"角色（状态）：台词"）。\n`;
+  repairMsg += `3. 输出格式：只输出【A】到【F】的完整片段，不要任何解释、确认、规划说明。\n`;
+  repairMsg += `4. 自检：输出前确认——每一条遗漏台词都必须出现在【C】的某个镜号叙事里，否则你输出的内容会被直接丢弃。\n\n`;
+  repairMsg += `【遗漏台词清单（必须全部出现在输出中）】\n`;
   missing.forEach((d, i) => {
     const colonIdx = d.indexOf('：');
     const charPrefix = colonIdx >= 0 ? d.substring(0, colonIdx + 1) : '';
     const missingClauses = getMissingClauses(d, cleanExisting);
     if (missingClauses.length > 0 && missingClauses.length < d.split(/(?<=[？！。])/g).filter(s => s.trim().length >= 4).length) {
-      // 部分子句缺失：只报告缺失的那几句，避免模型把已有部分重复写入
-      repairMsg += `遗漏${i + 1}：${charPrefix}${missingClauses.join('')}（注：此台词其余句已存在，只需补入这几句）\n`;
+      repairMsg += `遗漏${i + 1}（部分子句）：${charPrefix}${missingClauses.join('')}\n`;
     } else {
       repairMsg += `遗漏${i + 1}：${d}\n`;
     }
   });
-  repairMsg += `\n【原输出】\n${existingOutput}\n\n`;
-  repairMsg += `请直接输出补全后的完整提示词，格式与原输出完全一致，不要任何解释。`;
+  repairMsg += `\n【原输出（请在此基础上补写，保留所有现有镜号不变）】\n${existingOutput}\n\n`;
+  repairMsg += `请直接输出补写后的完整片段（【A】到【F】），不要任何解释或确认语句。`;
   return await callAPI(systemPrompt, repairMsg, config);
 }
 
@@ -888,7 +948,12 @@ function buildPlanPrompt(scene, costumeCard, dialogues) {
   p += `   · >3秒台词：必须拆成多个镜号——起始镜号放dialogue，后续镜号task写切镜方式（换角度/反打听者/INSERT细节/声画分离），禁止单个镜号对着一个人说话超过3秒。\n`;
   p += `   · >8秒台词/OS独白：多镜号中必须包含至少一个声画分离镜号（task写"声画分离：XX台词继续，画面切XXX"），把镜头交出去看别的。\n`;
   p += `   · >15秒台词/OS独白：声画分离镜号可以跨片段，声音不断画面跨片段过渡。\n`;
-  p += `4. ⚠️【强制】剧本中每一条台词都必须出现在某个镜号的dialogue字段里，一条都不能漏。规划前先数清共有几条台词，规划后逐条确认每条台词都有对应的dialogue字段，否则程序验证会失败并强制重新规划。\n`;
+  p += `4. ⚠️【强制】台词顺序铁律：\n`;
+  p += `   · 台词必须严格按照剧本出现顺序分配到各镜号，不能打乱顺序。\n`;
+  p += `   · 台词[台词1]必须出现在台词[台词2]之前，台词[台词2]必须出现在台词[台词3]之前，以此类推。\n`;
+  p += `   · 违反此顺序会导致剧情混乱，属于致命错误。\n`;
+  p += `   · 规划前先数清共有几条台词，规划后逐条确认顺序正确。\n`;
+  p += `   · 程序验证失败并强制重新规划。\n`;
   p += `5. 导演讲戏中标注"必须补"或"⚠️必须"的内容必须出现在某个镜号的task里。\n`;
   p += `6. 台词之间的反应镜头（呼吸感）：\n`;
   p += `   · 角色A说完台词后，不要直接让角色B接台词。中间插一个反应镜号（1-2s）：听者表情变化/沉默/身体反应\n`;
@@ -1102,7 +1167,27 @@ function validatePlan(plan, dialogues, limits, minSegments, relaxed = false) {
     }
   }
 
-  // 台词分配完整性
+  // 台词分配完整性 + 重复检测
+  // 先检测台词重复：同一句台词不能出现在多个片段
+  const dialogueSegmentCount = new Map(); // dialogue文本 → 出现次数
+  for (const seg of plan.segments) {
+    for (const shot of (seg.shots || [])) {
+      if (shot.dialogue && shot.dialogue.trim()) {
+        const key = shot.dialogue.trim();
+        dialogueSegmentCount.set(key, (dialogueSegmentCount.get(key) || 0) + 1);
+      }
+    }
+  }
+  const duplicateDialogues = [];
+  for (const [dlg, count] of dialogueSegmentCount) {
+    if (count > 1) {
+      duplicateDialogues.push(`台词"${dlg.slice(0, 20)}..."出现在${count}个片段，必须只出现在1个片段`);
+    }
+  }
+  if (duplicateDialogues.length > 0) {
+    errors.push(`⚠️ 台词重复错误：${duplicateDialogues.join('；')}`);
+  }
+
   const allPlanned = plan.segments
     .flatMap(s => s.shots || [])
     .map(s => (s.dialogue || '').replace(QUOTE_STRIP_RE, ''))
@@ -1166,6 +1251,19 @@ function forceInjectMissingDialogues(plan, dialogues) {
     .map(s => (s.dialogue || '').replace(QUOTE_STRIP_RE, ''))
     .join('\n'));
 
+  // 统计 plan 中每个锚点出现的次数（用于处理重复台词）
+  const anchorCountInPlan = new Map();
+  for (const seg of plan.segments) {
+    for (const shot of (seg.shots || [])) {
+      if (!shot.dialogue) continue;
+      const contentNorm = normalizeDialogueForMatch(stripDirectorNote(shot.dialogue));
+      const anchor = contentNorm.slice(0, 10);
+      if (anchor) {
+        anchorCountInPlan.set(anchor, (anchorCountInPlan.get(anchor) || 0) + 1);
+      }
+    }
+  }
+
   for (let segIdx = 0; segIdx < plan.segments.length; segIdx++) {
     const seg = plan.segments[segIdx];
     const shotTexts = normalizeDialogueForMatch((seg.shots || []).map(s => (s.dialogue || '').replace(QUOTE_STRIP_RE, '')).join('\n'));
@@ -1210,8 +1308,34 @@ function forceInjectMissingDialogues(plan, dialogues) {
   if (missingIndices.length === 0) return plan;
   console.log(`📌 程序强制注入 ${missingIndices.length} 条遗漏台词...`);
 
-  // 3. 对每条遗漏台词，找最近邻已分配台词所在片段，追加新镜号
+  // 3. 对每条遗漏台词，找最近邻已分配台词所在片段
+  //    ★ 关键修复：插入到"正确位置"而非追加到片段末尾，保证台词顺序
   for (const dIdx of missingIndices) {
+    const d = dialogues[dIdx];
+    const colonIdx = d.indexOf('：');
+    const charName = colonIdx >= 0 ? d.substring(0, colonIdx) : '';
+    const content = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d).trim();
+
+    // ─── 防重复兜底 ───
+    const contentNorm = normalizeDialogueForMatch(stripDirectorNote(content));
+    const anchor = contentNorm.slice(0, 10);
+    if (anchor && anchorCountInPlan.has(anchor)) {
+      let dialogueAnchorCount = 0;
+      for (let i = 0; i < dialogues.length; i++) {
+        const d2 = dialogues[i];
+        const cIdx = d2.indexOf('：');
+        const c2 = stripDirectorNote((cIdx >= 0 ? d2.substring(cIdx + 1) : d2)).trim();
+        const a2 = normalizeDialogueForMatch(c2).slice(0, 10);
+        if (a2 === anchor) dialogueAnchorCount++;
+      }
+      const planCount = anchorCountInPlan.get(anchor);
+      if (planCount >= dialogueAnchorCount) {
+        console.log(`   ⊘ 台词${dIdx + 1} 已在 plan 中（相同锚点 ${planCount} >= 台词中 ${dialogueAnchorCount}，跳过）：${d.slice(0, 40)}`);
+        continue;
+      }
+    }
+
+    // 找目标片段：优先用前邻台词，其次用后邻台词
     let targetSegIdx = -1;
     for (let i = dIdx - 1; i >= 0; i--) {
       if (segForDialogue.has(i)) { targetSegIdx = segForDialogue.get(i); break; }
@@ -1223,35 +1347,57 @@ function forceInjectMissingDialogues(plan, dialogues) {
     }
     if (targetSegIdx === -1) targetSegIdx = plan.segments.length - 1;
 
-    const d = dialogues[dIdx];
-    const colonIdx = d.indexOf('：');
-    const charName = colonIdx >= 0 ? d.substring(0, colonIdx) : '';
-    const content = (colonIdx >= 0 ? d.substring(colonIdx + 1) : d).trim();
-
-    // ─── 防重复兜底：注入前在全 plan 再扫一遍，如果已在任意片段出现就跳过 ───
-    // 这是第二道保险（第一道是上面的归一化检测）。只要 LLM 把台词写成任何
-    // 认得出来的形式——完整句/拆句/加破折号/换行——就不会重复注入。
-    // 匹配前先剥离演员指导括号，保证与 validatePlan 标准一致
-    const contentNorm = normalizeDialogueForMatch(stripDirectorNote(content));
-    const anchor = contentNorm.slice(0, 10);
-    if (anchor && plannedConcat.includes(anchor)) {
-      // 已经在 plan 里了·说明这条其实没遗漏·跳过注入
-      console.log(`   ⊘ 台词${dIdx + 1} 已在 plan 中（跳过重复注入）：${d.slice(0, 40)}`);
-      continue;
-    }
-
-    const minDur = Math.min(Math.max(calcMinDuration(d), 2), 5);
     const seg = plan.segments[targetSegIdx];
     if (!seg.shots) seg.shots = [];
-    seg.shots.push({
-      num: seg.shots.length + 1,
+
+    // ─── ★ 关键：按正确顺序插入而非追加到末尾 ───
+    // 找到"前邻台词"在片段内的镜号索引，在其后插入
+    // 如果前邻台词在其他片段，则追加到片段末尾
+    const minDur = Math.min(Math.max(calcMinDuration(d), 2), 5);
+    const newShot = {
+      num: 1, // 临时占位，后面统一重排
       duration: minDur,
       shot_type: '[中近景]',
       task: `${charName ? charName + '说台词' : '台词'}·听者基线反应`,
       dialogue: content
-    });
+    };
+
+    // 找前邻台词在目标片段内的镜号索引
+    let insertAfter = -1;
+    for (let prevDIdx = dIdx - 1; prevDIdx >= 0; prevDIdx--) {
+      if (segForDialogue.get(prevDIdx) === targetSegIdx) {
+        // 前邻台词也在目标片段内 → 找到它在片段中的位置
+        // 遍历片段镜号，找到含有该台词内容的镜号
+        for (let sIdx = 0; sIdx < seg.shots.length; sIdx++) {
+          const s = seg.shots[sIdx];
+          if (!s.dialogue) continue;
+          const prevContent = stripDirectorNote(s.dialogue).trim();
+          const prevD = dialogues[prevDIdx];
+          const prevColonIdx = prevD.indexOf('：');
+          const prevContentFull = stripDirectorNote(
+            (prevColonIdx >= 0 ? prevD.substring(prevColonIdx + 1) : prevD)
+          ).trim();
+          if (normalizeDialogueForMatch(prevContent).includes(normalizeDialogueForMatch(prevContentFull.slice(0, 10)))) {
+            insertAfter = sIdx;
+            break;
+          }
+        }
+        break;
+      }
+    }
+
+    if (insertAfter >= 0) {
+      // 插入到前邻台词之后（注意：后续镜号会往后挤，顺序正确）
+      seg.shots.splice(insertAfter + 1, 0, newShot);
+    } else {
+      // 前邻台词不在目标片段内，追加到片段末尾
+      seg.shots.push(newShot);
+    }
+
+    // 统一重排所有镜号 num
+    seg.shots.forEach((s, i) => { s.num = i + 1; });
     segForDialogue.set(dIdx, targetSegIdx);
-    console.log(`   → 台词${dIdx + 1} 注入到 ${seg.id}：${d.slice(0, 40)}`);
+    console.log(`   → 台词${dIdx + 1} 注入到 ${seg.id}（位置：${insertAfter >= 0 ? '台词' + (dIdx) + '之后' : '片段末尾'}）：${d.slice(0, 40)}`);
   }
 
   return plan;
@@ -1358,7 +1504,13 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
   p += `1. C部分镜号数量、时长必须与规划完全一致，不得增删。\n`;
   p += `1a. 每个段落以 [景别] 开头：${scene.sceneType === 'wuxi' ? '武戏用英文如 [大特写 (Extreme Close-up)]' : '文戏用中文如 [近景]·[中近景]·[过肩]'}，后接复合运镜指令，焦段写在镜号头部或描述里。\n`;
   p += `1b. ⚠️ 每个镜号必须三层缝合：第一层叙事+第二层摄影机运动（有情绪/力的理由）+第三层（）物理反馈，缺一不可。空壳镜号（只有说话没有运镜没有物理反馈）禁止输出。\n`;
-  p += `2. 含台词的镜号必须在叙事正文里写出台词原文（动作状态+冒号+引号）。\n`;
+  p += `2. ⚠️⚠️⚠️ 台词铁律（最高优先级）：\n`;
+  p += `   · 台词必须逐字使用剧本原文，不允许任何修改、替换、概括或改写。\n`;
+  p += `   · 禁止修改台词内容："XX说：'xxx'" → 必须原样使用冒号后的引号内原文。\n`;
+  p += `   · 禁止概括台词："XX说了句关心的话" → 禁止，必须写出完整台词原文。\n`;
+  p += `   · 禁止添加台词："XX说了'xxx'" → 禁止，剧本没有的台词不能添加。\n`;
+  p += `   · 含台词的镜号必须在叙事正文里写出台词原文（动作状态+冒号+引号）。\n`;
+  p += `   · 违反此规则=致命错误，输出作废。\n`;
   p += `3. OS独白必须以"角色OS：「引号原文」"格式写进对应镜号叙事正文。\n`;
   p += `3b. 声画分离镜号（task含"声画分离"）：写纯画面叙事，开头注明"【声画分离】XX的OS/台词继续"，不重复写台词原文。画面按【文戏专项规则】规则十-补的三层优先级选择（①听者反应 ②说话者细节 ③空景环境）。\n`;
   p += `3d. 反应镜号（task含"反应"）：纯画面·写听者的表情变化、身体反应、沉默。不写台词。让对话有呼吸感，不要从一句台词直接跳到下一句。\n`;
@@ -1474,8 +1626,12 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
 
   if (segDialogues.length > 0) {
     p += `【本片段台词清单（★标注台词全部必须逐字出现在C部分正文，不得遗漏）】\n`;
+    // ★ 按剧本顺序逐条列出，并在 prompt 里明确"禁止打乱顺序"
     segDialogues.forEach((d, i) => { p += `★[台词${i + 1}] ${d}\n`; });
-    p += `⚠️ 共${segDialogues.length}条台词，写完C部分后逐条核对，有遗漏禁止输出。\n\n`;
+    p += `⚠️ 共${segDialogues.length}条台词，写完C部分后逐条核对，有遗漏禁止输出。\n`;
+    p += `⚠️ 台词顺序铁律：本片段内镜号必须严格按照上述顺序排列，写镜1时用台词1，写镜2时用台词2，禁止调换顺序或跨越顺序。\n`;
+    p += `   · 例如：如果台词顺序是「台词A → 台词B → 台词C」，则镜1对话A，镜2对B，镜3对C。\n`;
+    p += `   · 禁止出现"镜1写台词B·镜2写台词A"这样的打乱顺序写法。\n\n`;
   }
 
   // ── 场景全部台词背景参考（防止因上下文遗忘导致前几步内容缺失）──
@@ -1714,13 +1870,28 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
 
     let segOutput = await callAPI(effectiveSystemPrompt, segPrompt, config);
 
-    // 台词核验 + 补写
+    // 台词核验 + 补写（最多补写1次·避免无限循环）
     const segDialogues = (seg.shots || []).map(s => s.dialogue).filter(Boolean);
     if (segDialogues.length > 0) {
-      const missing = verifyDialogues(segDialogues, segOutput);
-      if (missing.length > 0) {
-        segOutput = await repairMissingDialogues(missing, segOutput, effectiveSystemPrompt, config);
-        console.log(`✓ ${seg.id} 台词补写完成`);
+      const missing1 = verifyDialogues(segDialogues, segOutput);
+      if (missing1.length > 0) {
+        console.log(`⚠️ ${seg.id} 第1次补写：${missing1.length} 条遗漏`);
+        let repaired = await repairMissingDialogues(missing1, segOutput, effectiveSystemPrompt, config);
+        // 复验：补写后仍然遗漏的·强制注入到 C 部分末尾
+        const missing2 = verifyDialogues(segDialogues, repaired);
+        if (missing2.length > 0) {
+          console.warn(`⚠️ ${seg.id} 补写后仍有 ${missing2.length} 条遗漏，强制注入...`);
+          // 把仍然遗漏的台词文本直接追加到 C 部分末尾（简单兜底）
+          const injectText = missing2.map(d => {
+            const ci = d.indexOf('：');
+            return ci >= 0 ? d : `（台词）：${d}`;
+          }).join('\n');
+          repaired = repaired.replace(/(?=【D】)/, `\n${injectText}\n`);
+          console.warn(`⚠️ ${seg.id} 强制注入 ${missing2.length} 条台词（不再调 API）`);
+        } else {
+          console.log(`✓ ${seg.id} 台词补写后核验通过`);
+        }
+        segOutput = repaired;
       } else {
         console.log(`✓ ${seg.id} 台词核验通过`);
       }
@@ -1792,6 +1963,31 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
       console.log(`✓ ${seg.id} 时长 ${actualTotal}s，合格`);
     }
 
+    // ── 单镜号台词时长检测 ─────────────────────────────────
+    // 检测每个镜头的台词是否能在分配的时长内完成
+    // 格式：镜1 2s · [中景] · dialogue:"赵一铭：怎么会..."
+    const SHOT_DIALOGUE_RE = /镜(\d+)\s+(\d+(?:\.\d+)?)\s*s[^·]*·[^·]*·dialogue:"([^"]+)"/g;
+    const shotDurationWarnings = [];
+    let match;
+    while ((match = SHOT_DIALOGUE_RE.exec(segOutput)) !== null) {
+      const shotNum = match[1];
+      const shotDur = parseFloat(match[2]);
+      const dialogue = match[3];
+      const minDur = calcMinDuration(dialogue);
+      if (minDur > shotDur) {
+        const warnMsg = `⚠️ ${seg.id} 镜${shotNum}：台词需≥${minDur}秒，分配${shotDur}秒，不足！`;
+        shotDurationWarnings.push(warnMsg);
+      }
+    }
+    if (shotDurationWarnings.length > 0) {
+      console.warn(`⚠️ ${seg.id} 单镜号台词时长不足警告：`);
+      shotDurationWarnings.forEach(w => console.warn(`   ${w}`));
+    }
+
+    // ── 字数统计（保留【A】+【B】+【C】+【D】+【E】+【F】<=1800检测）─────────
+    const segCharCount = segOutput.replace(/<analysis>[\s\S]*?<\/analysis>/g, '').trim().length;
+    console.log(`📊 ${seg.id} 字数统计：${segCharCount}字 ${segCharCount <= 1800 ? '✅' : '❌ 超标'}`);
+
     // ✨ 首片段完成后提取 A 部分，广播给后续所有片段
     if (si === 0 && referenceAResolve) {
       const extractedA = extractASection(segOutput);
@@ -1804,6 +2000,9 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
       referenceAResolve(referenceA); // 无论是否提取成功都 resolve，不阻塞后续片段
       referenceAResolve = null;
     }
+
+    // ── 过滤分批提示信息 ─────────────────────────────────
+    segOutput = filterBatchPrompts(segOutput);
 
     return segOutput;
   }
@@ -1960,13 +2159,26 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
       // 整体再验一次
       const finalMissing2 = verifyDialogues(dialogues, outputs.join('\n'));
       if (finalMissing2.length > 0) {
-        console.warn(`⚠️ ${scene.id} 智能补写后仍有 ${finalMissing2.length} 条遗漏·最后兜底到末尾片段`);
-        // 最后的最后·还漏的再全塞到末尾
+        console.warn(`⚠️ ${scene.id} 智能补写后仍有 ${finalMissing2.length} 条遗漏，兜底到末尾片段补写（第2次）...`);
         const lastIdx = outputs.findLastIndex((o, i) => !o.startsWith('[') && i === outputs.length - 1);
         const fallbackIdx = lastIdx >= 0 ? lastIdx : outputs.length - 1;
         if (fallbackIdx >= 0 && !outputs[fallbackIdx].startsWith('[')) {
           try {
-            outputs[fallbackIdx] = await repairMissingDialogues(finalMissing2, outputs[fallbackIdx], systemPrompt, config);
+            const repaired2 = await repairMissingDialogues(finalMissing2, outputs[fallbackIdx], systemPrompt, config);
+            // 复验第2次补写
+            const finalMissing3 = verifyDialogues(dialogues, repaired2);
+            if (finalMissing3.length > 0) {
+              console.warn(`⚠️ ${scene.id} 兜底补写后仍有 ${finalMissing3.length} 条遗漏，不再补写，强制注入...`);
+              // 强制注入到末尾片段的 C 部分
+              const injectText = finalMissing3.map(d => {
+                const ci = d.indexOf('：');
+                return ci >= 0 ? d : `（台词）：${d}`;
+              }).join('\n');
+              outputs[fallbackIdx] = repaired2.replace(/(?=【D】)/, `\n${injectText}\n`);
+            } else {
+              outputs[fallbackIdx] = repaired2;
+              console.log(`✓ ${scene.id} 兜底补写后核验通过`);
+            }
           } catch (err) {
             console.warn(`⚠️ 兜底补写失败：${err.message}`);
           }
@@ -1979,8 +2191,37 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
     }
   }
 
+  // ── 全场景单镜号台词时长扫描 ─────────────────────────────────
+  // 检测所有片段的所有镜头是否存在台词时长超过分配时长的问题
+  const allShotsWarning = [];
+  for (let segIdx = 0; segIdx < outputs.length; segIdx++) {
+    const segText = outputs[segIdx];
+    const segId = plan.segments[segIdx]?.id || `片段${segIdx + 1}`;
+    const SHOT_DIALOGUE_RE_SCAN = /镜(\d+)\s+(\d+(?:\.\d+)?)\s*s[^·]*·[^·]*·dialogue:"([^"]+)"/g;
+    let match;
+    while ((match = SHOT_DIALOGUE_RE_SCAN.exec(segText)) !== null) {
+      const shotNum = match[1];
+      const shotDur = parseFloat(match[2]);
+      const dialogue = match[3];
+      const minDur = calcMinDuration(dialogue);
+      if (minDur > shotDur) {
+        allShotsWarning.push(`${segId} 镜${shotNum}：台词"${dialogue.slice(0, 15)}..."需${minDur}秒，分配${shotDur}秒（差${(minDur - shotDur).toFixed(1)}秒）`);
+      }
+    }
+  }
+  if (allShotsWarning.length > 0) {
+    console.warn(`\n⚠️ ⚠️ ⚠️ ${scene.id} 全场景镜头时长不足汇总（共${allShotsWarning.length}处）：`);
+    allShotsWarning.forEach(w => console.warn(`   ${w}`));
+    console.warn(`请调整该场景的片段分配或增加片段数量！\n`);
+  } else {
+    console.log(`✓ ${scene.id} 全场景镜头时长检测通过`);
+  }
+
   // 重新生成 finalOutput（补写可能修改了 outputs）
-  const finalOutput = scenePlanBlock + '\n\n' + outputs.join('\n\n');
+  let finalOutput = scenePlanBlock + '\n\n' + outputs.join('\n\n');
+
+  // ── 过滤分批提示信息 ─────────────────────────────────
+  finalOutput = filterBatchPrompts(finalOutput);
 
   // ── 全场景导演指令核验 ─────────────────────────────────
   // 检查导演的关键动作词是否出现在最终输出中
@@ -2130,6 +2371,31 @@ async function processSceneSingleShot(scene, costumeCard, config, job, sceneInde
       console.log(`✓ ${scene.id} 单次模式片段${si + 1}：时长 ${segTotal}s，合格`);
     }
   }
+
+  // ── 单次模式单镜号台词时长检测 ─────────────────────────────────
+  const ssShotWarnings = [];
+  const SHOT_DIALOGUE_RE_SS = /镜(\d+)\s+(\d+(?:\.\d+)?)\s*s[^·]*·[^·]*·dialogue:"([^"]+)"/g;
+  let match;
+  while ((match = SHOT_DIALOGUE_RE_SS.exec(result)) !== null) {
+    const shotNum = match[1];
+    const shotDur = parseFloat(match[2]);
+    const dialogue = match[3];
+    const minDur = calcMinDuration(dialogue);
+    if (minDur > shotDur) {
+      ssShotWarnings.push(`镜${shotNum}：台词"${dialogue.slice(0, 15)}..."需${minDur}秒，分配${shotDur}秒`);
+    }
+  }
+  if (ssShotWarnings.length > 0) {
+    console.warn(`⚠️ ${scene.id} 单次模式单镜号台词时长不足：`);
+    ssShotWarnings.forEach(w => console.warn(`   ${w}`));
+  }
+
+  // ── 字数统计（保留【A】+【B】+【C】+【D】+【E】+【F】<=1800检测）─────────
+  const ssCharCount = result.replace(/<analysis>[\s\S]*?<\/analysis>/g, '').trim().length;
+  console.log(`📊 ${scene.id} 单次模式字数统计：${ssCharCount}字 ${ssCharCount <= 1800 ? '✅' : '❌ 超标'}`);
+
+  // ── 过滤分批提示信息 ─────────────────────────────────
+  result = filterBatchPrompts(result);
 
   return result;
 }
@@ -2335,8 +2601,7 @@ function parseRawScript(text) {
     if (!sid) { const f2 = t.match(/^场景(\S+)\s+(.+)/); if (f2) { sid = f2[1]; hdr = f2[2].trim(); } }
     // 格式3: 第xxx场 内容
     if (!sid) { const f3 = t.match(/^第(\S+)[场幕]\s*(.*)/); if (f3) { sid = f3[1]; hdr = f3[2].trim() || '第' + f3[1] + '场'; } }
-    // 格式4: 1-1 郊区旧楼 傍晚 外（地点在时间词之前）
-    if (!sid) { const f4 = t.match(/^(\d+[-–]\d+[A-Za-z]?)\s+(\S+(?:\s+\S+)?)\s+(日|夜|晨|黄昏|傍晚|清晨)\s+([内外]+)\s*(.*)/); if (f4) { sid = f4[1]; hdr = f4[3] + ' ' + f4[4] + ' ' + f4[2] + (f4[5] ? ' ' + f4[5] : ''); } }
+    if (!sid) { const f4 = t.match(/^(\d+[-–]\d+[A-Za-z]?)\s+(.+?)\s+(日|夜|晨|黄昏|傍晚|清晨)\s+(内|外|内外)/); if (f4) { sid = f4[1]; hdr = f4[3] + ' ' + f4[4] + ' ' + f4[2].trim(); } }
     if (sid) {
       if (cur) scenes.push(cur);
       const lm = hdr.match(/[内外]\s+(.+)$/) || hdr.match(/(?:外|内)\s*(.+)/);

@@ -479,6 +479,17 @@ function onModelChange() {
 async function handleAgentAUpload(input) {
   const file = input.files[0];
   if (!file) return;
+
+  // ⚠️ 上传新剧本时重置所有旧状态，防止残留数据造成标题/内容错乱
+  agentAState.scriptText = null;
+  agentAState.scenes = null;
+  agentAState.annotatedScript = null;
+  agentAState.annotateJobId = null;
+  agentAState.generateJobId = null;
+  agentAState.mappedSegments = null;
+  agentAState.sceneOptions = null;
+  agentAState.directorNotes = null;
+
   const nameEl = document.getElementById('agentAFileName');
   nameEl.textContent = `已选择：${file.name}`;
   nameEl.classList.remove('hidden');
