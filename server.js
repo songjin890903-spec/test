@@ -505,9 +505,12 @@ async function repairMissingDialogues(missing, existingOutput, systemPrompt, con
   let repairMsg = `任务：将以下遗漏台词补写进【C】部分的对应镜号叙事中。\n`;
   repairMsg += `规则：\n`;
   repairMsg += `1. 必须逐字使用台词原文，不得修改、概括或省略。\n`;
-  repairMsg += `2. 补写位置：找到最靠近该台词上下文的镜号，在其叙事里加入"角色：台词原文"（OS用"角色OS：台词"，独白用"角色（状态）：台词"）。\n`;
-  repairMsg += `3. 输出格式：只输出【A】到【F】的完整片段，不要任何解释、确认、规划说明。\n`;
-  repairMsg += `4. 自检：输出前确认——每一条遗漏台词都必须出现在【C】的某个镜号叙事里，否则你输出的内容会被直接丢弃。\n\n`;
+  repairMsg += `2. 补写位置：找到最靠近该台词上下文的镜号，在其叙事里加入"角色：台词原文"。\n`;
+  repairMsg += `3. ⚠️ VO/画外音/旁白 台词特殊处理：\n`;
+  repairMsg += `   - 格式为"（VO）台词"、"(VO）：台词"、"（旁白）：台词"的，必须写成"角色VO/OS：台词内容（从听筒/画外传出）"的形式，融入对应镜号的叙事描述中。\n`;
+  repairMsg += `   - 禁止把 VO 台词写成独立的"（台词）：..."行——必须嵌入某个镜号的叙事里。\n`;
+  repairMsg += `4. 输出格式：只输出【A】到【F】的完整片段，不要任何解释、确认、规划说明。\n`;
+  repairMsg += `5. 自检：输出前确认——每一条遗漏台词都必须出现在【C】的某个镜号叙事里，否则你输出的内容会被直接丢弃。\n\n`;
   repairMsg += `【遗漏台词清单（必须全部出现在输出中）】\n`;
   missing.forEach((d, i) => {
     const colonIdx = d.indexOf('：');
@@ -1661,6 +1664,7 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
   p += `   · 含台词的镜号必须在叙事正文里写出台词原文（动作状态+冒号+引号）。\n`;
   p += `   · 违反此规则=致命错误，输出作废。\n`;
   p += `3. OS独白必须以"角色OS：「引号原文」"格式写进对应镜号叙事正文。\n`;
+  p += `   · ⚠️ VO/画外音/旁白 台词严禁输出成独立的"（台词）：..."行——必须写进某个镜号的叙事正文里（如："刘秘书VO/OS：'喂，大少爷？'（从听筒传出）"）。\n`;
   p += `3b. 声画分离镜号（task含"声画分离"）：写纯画面叙事，开头注明"【声画分离】XX的OS/台词继续"，不重复写台词原文。画面按【文戏专项规则】规则十-补的三层优先级选择（①听者反应 ②说话者细节 ③空景环境）。\n`;
   p += `3d. 反应镜号（task含"反应"）：纯画面·写听者的表情变化、身体反应、沉默。不写台词。让对话有呼吸感，不要从一句台词直接跳到下一句。\n`;
   p += `4. C部分第一段第一句锚定入场景别和视角。\n`;
@@ -2027,13 +2031,29 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
         const missing2 = verifyDialogues(segDialogues, repaired);
         if (missing2.length > 0) {
           console.warn(`⚠️ ${seg.id} 补写后仍有 ${missing2.length} 条遗漏，强制注入...`);
-          // 把仍然遗漏的台词文本直接追加到 C 部分末尾（简单兜底）
-          const injectText = missing2.map(d => {
+          // ★ 修复：不再输出 (台词)：... 裸行，改为追加到【C】最后一个镜号的叙事里
+          let injectNarr = '';
+          missing2.forEach(d => {
             const ci = d.indexOf('：');
-            return ci >= 0 ? d : `（台词）：${d}`;
-          }).join('\n');
-          repaired = repaired.replace(/(?=【D】)/, `\n${injectText}\n`);
-          console.warn(`⚠️ ${seg.id} 强制注入 ${missing2.length} 条台词（不再调 API）`);
+            const charRaw = ci >= 0 ? d.substring(0, ci) : '';
+            const charName = charRaw.replace(/[（(]?(?:VO|旁白|画外音|OS)[）)]?\s*/g, '').trim();
+            const content = ci >= 0 ? d.substring(ci + 1).trim() : d;
+            const isVO = /^(?:（VO）|（旁白）|（画外音）|\(?\s*(?:VO|OS)\s*\)?\s*)[：:]/.test(d);
+            if (isVO) {
+              if (charName) {
+                injectNarr += `画外音：` + content + `（` + charName + `OS）\n`;
+              } else {
+                injectNarr += `画外音：` + content + `\n`;
+              }
+            } else if (charName) {
+              injectNarr += charName + `开口说："` + content + `"\n`;
+            } else {
+              injectNarr += `画外音："` + content + `"\n`;
+            }
+          });
+          // 追加到【C】最后一个镜号叙述之后、【D】之前
+          repaired = repaired.replace(/(?=【D】)/, `\n` + injectNarr + `\n`);
+          console.warn(`⚠️ ${seg.id} 强制注入 ${missing2.length} 条台词叙事（不再调 API）`);
         } else {
           console.log(`✓ ${seg.id} 台词补写后核验通过`);
         }
@@ -2424,6 +2444,7 @@ async function processSceneSingleShot(scene, costumeCard, config, job, sceneInde
   userMsg += `7. 【镜头意图】INSERT要求的特写画面，必须作为独立镜号出现在C部分，不得合并进其他镜号。\n`;
   userMsg += `8. 动笔写任何片段的C部分之前，必须先在analysis块【台词分配表】里逐条列出本片段所有台词和OS独白（包括原文），标注计划写入哪个镜号；写完后逐句回标"已在镜X使用"，有遗漏禁止输出。\n`;
   userMsg += `9. OS独白必须以"角色OS：引号原文"格式写进对应镜号叙事正文，不能只写画面描述而省略OS文字。\n`;
+  userMsg += `9b. ⚠️ VO/画外音/旁白 台词严禁输出成独立的"（台词）：..."行——必须写成"角色VO/OS：台词原文（从听筒/画外传出）"的形式，融入某个镜号的叙事正文里。\n`;
   userMsg += `10. ⚠️ 每个片段镜号时长之和不得超过15秒。台词多/导演指令多时增加片段数量，不要硬塞。\n`;
   userMsg += `11. ⚠️ 台词之间必须有反应镜头（1-2秒）：角色A说完后，不要直接接角色B的台词。中间插一个听者反应的镜号。反应镜头也占时间，装不下就多分一个片段。\n`;
   userMsg += `12. 导演批注里描述的具体动作不能改——"漂移甩尾"不能改成"直冲"。\n`;
