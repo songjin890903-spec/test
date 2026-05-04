@@ -384,7 +384,9 @@ function stripDirectorNotes(text) {
 // ============================================================
 function extractDialogues(sceneContent) {
   const stripped = stripDirectorNotes(sceneContent);
-  const excludePrefixes = ['场景', '人物', '▲', '【', '（'];
+  // ⚠️ 注意：（不能放 excludePrefixes 里，因为（VO）：（旁白）：等合法台词行以（开头
+  // 统一在循环内用 startsWith + 豁免逻辑处理
+  const excludePrefixes = ['场景', '人物', '▲', '【', '【'];
   const excludeKeywords = [
     '必须捕捉', '稳帧点', '镜头意图', '人物内心', '场景感受', '禁止',
     '节点缺口', '补充方案', '身体反应', '心理状态', '情绪走向', '观众带走',
@@ -400,10 +402,11 @@ function extractDialogues(sceneContent) {
     // ① 先剥离字幕条标注，再判断是否是台词行
     const lineNoSubtitle = trimmed.replace(SUBTITLE_TAG_RE, '').trim();
     if (!lineNoSubtitle.includes('：')) continue;
-    if (excludePrefixes.some(p => lineNoSubtitle.startsWith(p))) {
-      // 豁免（旁白）（画外音）（VO）——它们都是有效的OS/旁白台词行
-      if (!lineNoSubtitle.startsWith('（旁白）') && !lineNoSubtitle.startsWith('（画外音）') && !lineNoSubtitle.startsWith('（VO）')) continue;
-    }
+    // ⚠️ 豁免各种 VO/旁白/画外音 格式（覆盖全角/半角括号+冒号变体）
+    const isVOOrSimilar = /^(?:（VO）|（旁白）|（画外音）|（OS）)[：:]/.test(lineNoSubtitle)
+      || /^\(?\s*VO\s*\)?\s*[：:]/.test(lineNoSubtitle)
+      || /^\(?\s*VO\s*\)?\s*[：:]/.test(trimmed);
+    if (!isVOOrSimilar && excludePrefixes.some(p => lineNoSubtitle.startsWith(p))) continue;
     const colonIdx = lineNoSubtitle.indexOf('：');
     const charPart = lineNoSubtitle.substring(0, colonIdx);
     const contentPart = lineNoSubtitle.substring(colonIdx + 1).trim();
@@ -413,7 +416,9 @@ function extractDialogues(sceneContent) {
     dialogues.push(trimmed);
   }
   // 日志：显示提取到的 VO/旁白台词（方便排查漏台词问题）
-  const voLines = dialogues.filter(d => d.startsWith('（VO）') || d.startsWith('（旁白）') || d.startsWith('（画外音）'));
+  const voLines = dialogues.filter(d =>
+    /^(?:（VO）|（旁白）|（画外音）|\(?\s*VO\s*\)?\s*[：:])/.test(d)
+  );
   if (voLines.length > 0) {
     console.log(`   [extractDialogues] VO/旁白台词 ${voLines.length} 条：`);
     voLines.forEach(v => console.log(`      ${v.slice(0, 60)}`));
