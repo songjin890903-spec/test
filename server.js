@@ -1419,6 +1419,11 @@ function forceInjectMissingDialogues(plan, dialogues) {
   }
 
   // 2. 找出遗漏台词——使用与 validatePlan 完全相同的多锚点 + 归一化逻辑
+  //    ★ 修复：用整句归一化内容做全包含检测，防止重复注入
+  const plannedConcatFull = normalizeDialogueForMatch(plan.segments
+    .flatMap(s => s.shots || [])
+    .map(s => (s.dialogue || '').replace(QUOTE_STRIP_RE, ''))
+    .join('\n'));
   const missingIndices = [];
   for (let dIdx = 0; dIdx < dialogues.length; dIdx++) {
     const d = dialogues[dIdx];
@@ -1426,6 +1431,13 @@ function forceInjectMissingDialogues(plan, dialogues) {
     const contentFull = stripDirectorNote(
       (colonIdx >= 0 ? d.substring(colonIdx + 1) : d)
     ).trim().replace(QUOTE_STRIP_RE, '');
+    const contentNormFull = normalizeDialogueForMatch(contentFull);
+    // 整句归一化后做包含检测（比多锚点更严格，防止拆分后误判）
+    if (contentNormFull && plannedConcatFull.includes(contentNormFull)) {
+      // 整句已在 plan 中，标记已分配，跳过
+      segForDialogue.set(dIdx, -1); // -1 表示已找到但不记录具体片段
+      continue;
+    }
     const clauses = contentFull.split(/(?<=[？！。])/g).map(s => s.trim()).filter(s => s.length >= 4);
     let isMissing;
     if (clauses.length > 1) {
@@ -1664,6 +1676,7 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
     p += `【文戏输出格式强制要求】（上述铁律必须通过以下格式体现）：\n`;
     p += `文1. ⚠️ 台词三拍结构（重量台词必用）：情绪拐点句/决绝句/摊牌句/底牌句/情感爆发句必须写成三拍——拍一组织动作（台词前·视线从A移到B/停顿一拍）+ 拍二说台词（一句内有2-3个视线落点）+ 拍三消化动作（台词后身体反应）。⛔ 禁止"张嘴念完就闭嘴"的零拍台词。\n`;
     p += `文2. ⚠️ 台词顺序铁律：台词必须按剧本顺序逐字使用，不允许打乱顺序。\n`;
+    p += `文2-1. ⚠️ 严禁跨镜号偷台词：镜N只能使用台词列表中第N句（或本片段规划分配给镜N的台词），禁止把后面镜号的台词提前写到前面镜号，也禁止把前面镜号的台词重复写到后面。每个镜号的台词内容必须唯一对应。\n`;
     p += `文3. ⚠️ 镜号头部格式："镜X  Xs · [景别] 复合运镜指令  焦段XXmm"。三层缺一不可（叙事+运镜+（）物理反馈）。\n`;
     p += `文4. ⚠️ 混合场景按文戏规则写——武戏动作当作"大幅度的情绪驱动肢体"，镜头保持克制。\n`;
     p += `文5. ⚠️ 镜号内容唯一性：每个镜号的画面内容必须独特，禁止两个镜号描写完全相同的动作、状态或构图。相邻镜号必须有明确的视觉差异（景别/角度/焦段/主体至少一项不同）。\n`;
@@ -2433,6 +2446,7 @@ async function processSceneSingleShot(scene, costumeCard, config, job, sceneInde
     userMsg += `【文戏输出格式强制要求】（上述铁律必须通过以下格式体现）：\n`;
     userMsg += `文1. ⚠️ 台词三拍结构（重量台词必用）：情绪拐点句/决绝句/摊牌句必须写三拍——拍一组织动作（台词前·视线从A移到B）+ 拍二说台词（一句话内有2-3个视线落点）+ 拍三消化动作（台词后身体反应）。⛔ 禁止"张嘴念完就闭嘴"。\n`;
     userMsg += `文2. ⚠️ 台词顺序铁律：台词必须按剧本顺序逐字使用，禁止打乱顺序。\n`;
+    userMsg += `文2-1. ⚠️ 严禁跨镜号偷台词：镜N只能使用本镜号应用的台词，禁止把后面镜号的台词提前写到前面镜号，也禁止把前面镜号的台词重复写到后面。\n`;
     userMsg += `文3. ⚠️ 听者身体反应：说话人说完立刻切走拍听者（上半身后靠/手停了/肩缩了），不是只拍脸。说话人不能连续占两个以上镜号。\n`;
     userMsg += `文4. ⚠️ 混合场景按文戏规则写——武戏动作当作"情绪驱动肢体"，镜头保持克制。\n`;
     userMsg += `文5. ⚠️ 镜号内容唯一性：每个镜号的画面内容必须独特，禁止两个镜号描写完全相同的动作、状态或构图。相邻镜号必须有明确的视觉差异（景别/角度/焦段/主体至少一项不同）。\n`;
