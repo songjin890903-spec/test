@@ -8,6 +8,53 @@ const crypto = require('crypto');
 const session = require('express-session');
 const mysql = require('mysql2/promise');
 
+// ================================================================
+// 方案A：从 prompts/ 读取文戏/武戏专项规则（与 prompts/ 文件保持同步）
+// 运行时动态提取铁律级关键行，避免 token 爆掉
+// ================================================================
+const WENXI_RAW = fs.readFileSync(path.join(__dirname, 'prompts', 'wenxi.txt'), 'utf8');
+const WUXI_RAW  = fs.readFileSync(path.join(__dirname, 'prompts', 'wuxi.txt'),  'utf8');
+
+// 提取 wenxi.txt 中铁律级关键行（带 ⛔/⚠️/✓/铁律/numbered rule 标记的行）
+function extractWenxiKeyRules(raw) {
+  const lines = raw.split('\n');
+  const keyLines = [];
+  let skip = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // 跳过"示范/示例"整块
+    if (/^【.+示范】?$/.test(trimmed) || /^━━━.+示范/.test(trimmed) || trimmed.startsWith('示范：') || trimmed.startsWith('错误示范：') || trimmed.startsWith('正确示范：')) {
+      skip = true;
+      continue;
+    }
+    if (trimmed === '' && skip) { skip = false; continue; }
+    if (/^(镜[0-9]|【.*镜[0-9])/.test(trimmed)) { skip = false; continue; } // 恢复非示范内容
+    if (/^【.+写法范例/.test(trimmed)) { skip = true; continue; }
+    if (/^▌.+写法范例/.test(trimmed)) { skip = true; continue; }
+    if (/^▌镜头模型库/.test(trimmed)) { skip = true; continue; }
+    if (/^▌动作线/.test(trimmed)) { skip = true; continue; }
+    if (/^▌.+工具$/.test(trimmed)) { skip = true; continue; }
+    if (/^▌自检清单/.test(trimmed)) { skip = false; }
+    // 保留铁律级行
+    if (!skip && (
+      trimmed.startsWith('**铁律') ||
+      trimmed.startsWith('铁律') ||
+      /^[\*⛔✓⚠️□]/.test(trimmed) ||
+      /^文[0-9]/.test(trimmed) ||
+      /^规则[0-9]/.test(trimmed) ||
+      /^━━━/.test(trimmed) ||
+      /^▌/.test(trimmed) ||
+      /^[0-9]+\.\s+\*\*.*/.test(trimmed)
+    )) {
+      keyLines.push(trimmed.replace(/\*\*/g, ''));
+    }
+  }
+  return keyLines.join('\n');
+}
+
+const WENXI_RULES = extractWenxiKeyRules(WENXI_RAW);
+const WUXI_RULES  = WUXI_RAW; // wuxi.txt 较小，直接使用全文
+
 const app = express();
 const PORT = process.env.PORT || 3006;
 
@@ -337,7 +384,9 @@ function stripDirectorNotes(text) {
 // ============================================================
 function extractDialogues(sceneContent) {
   const stripped = stripDirectorNotes(sceneContent);
-  const excludePrefixes = ['场景', '人物', '▲', '【', '（'];
+  // ⚠️ 注意：（不能放 excludePrefixes 里，因为（VO）：（旁白）：等合法台词行以（开头
+  // 统一在循环内用 startsWith + 豁免逻辑处理
+  const excludePrefixes = ['场景', '人物', '▲', '【', '【'];
   const excludeKeywords = [
     '必须捕捉', '稳帧点', '镜头意图', '人物内心', '场景感受', '禁止',
     '节点缺口', '补充方案', '身体反应', '心理状态', '情绪走向', '观众带走',
@@ -353,10 +402,11 @@ function extractDialogues(sceneContent) {
     // ① 先剥离字幕条标注，再判断是否是台词行
     const lineNoSubtitle = trimmed.replace(SUBTITLE_TAG_RE, '').trim();
     if (!lineNoSubtitle.includes('：')) continue;
-    if (excludePrefixes.some(p => lineNoSubtitle.startsWith(p))) {
-      // 豁免（旁白）（画外音）（VO）——它们都是有效的OS/旁白台词行
-      if (!lineNoSubtitle.startsWith('（旁白）') && !lineNoSubtitle.startsWith('（画外音）') && !lineNoSubtitle.startsWith('（VO）')) continue;
-    }
+    // ⚠️ 豁免各种 VO/旁白/画外音 格式（覆盖全角/半角括号+冒号变体）
+    const isVOOrSimilar = /^(?:（VO）|（旁白）|（画外音）|（OS）)[：:]/.test(lineNoSubtitle)
+      || /^\(?\s*VO\s*\)?\s*[：:]/.test(lineNoSubtitle)
+      || /^\(?\s*VO\s*\)?\s*[：:]/.test(trimmed);
+    if (!isVOOrSimilar && excludePrefixes.some(p => lineNoSubtitle.startsWith(p))) continue;
     const colonIdx = lineNoSubtitle.indexOf('：');
     const charPart = lineNoSubtitle.substring(0, colonIdx);
     const contentPart = lineNoSubtitle.substring(colonIdx + 1).trim();
@@ -366,7 +416,9 @@ function extractDialogues(sceneContent) {
     dialogues.push(trimmed);
   }
   // 日志：显示提取到的 VO/旁白台词（方便排查漏台词问题）
-  const voLines = dialogues.filter(d => d.startsWith('（VO）') || d.startsWith('（旁白）') || d.startsWith('（画外音）'));
+  const voLines = dialogues.filter(d =>
+    /^(?:（VO）|（旁白）|（画外音）|\(?\s*VO\s*\)?\s*[：:])/.test(d)
+  );
   if (voLines.length > 0) {
     console.log(`   [extractDialogues] VO/旁白台词 ${voLines.length} 条：`);
     voLines.forEach(v => console.log(`      ${v.slice(0, 60)}`));
@@ -453,9 +505,12 @@ async function repairMissingDialogues(missing, existingOutput, systemPrompt, con
   let repairMsg = `任务：将以下遗漏台词补写进【C】部分的对应镜号叙事中。\n`;
   repairMsg += `规则：\n`;
   repairMsg += `1. 必须逐字使用台词原文，不得修改、概括或省略。\n`;
-  repairMsg += `2. 补写位置：找到最靠近该台词上下文的镜号，在其叙事里加入"角色：台词原文"（OS用"角色OS：台词"，独白用"角色（状态）：台词"）。\n`;
-  repairMsg += `3. 输出格式：只输出【A】到【F】的完整片段，不要任何解释、确认、规划说明。\n`;
-  repairMsg += `4. 自检：输出前确认——每一条遗漏台词都必须出现在【C】的某个镜号叙事里，否则你输出的内容会被直接丢弃。\n\n`;
+  repairMsg += `2. 补写位置：找到最靠近该台词上下文的镜号，在其叙事里加入"角色：台词原文"。\n`;
+  repairMsg += `3. ⚠️ VO/画外音/旁白 台词特殊处理：\n`;
+  repairMsg += `   - 格式为"（VO）台词"、"(VO）：台词"、"（旁白）：台词"的，必须写成"角色VO/OS：台词内容（从听筒/画外传出）"的形式，融入对应镜号的叙事描述中。\n`;
+  repairMsg += `   - 禁止把 VO 台词写成独立的"（台词）：..."行——必须嵌入某个镜号的叙事里。\n`;
+  repairMsg += `4. 输出格式：只输出【A】到【F】的完整片段，不要任何解释、确认、规划说明。\n`;
+  repairMsg += `5. 自检：输出前确认——每一条遗漏台词都必须出现在【C】的某个镜号叙事里，否则你输出的内容会被直接丢弃。\n\n`;
   repairMsg += `【遗漏台词清单（必须全部出现在输出中）】\n`;
   missing.forEach((d, i) => {
     const colonIdx = d.indexOf('：');
@@ -859,14 +914,19 @@ function calcMinDuration(dialogueLine) {
   let content = colonIdx >= 0
     ? dialogueLine.substring(colonIdx + 1).trim()
     : dialogueLine.trim();
+  // 提取角色名后的标签（如：刘秘书（颤音，恐慌，VO）：）
+  const tagMatch = dialogueLine.match(/（([^）]*)）[：:]/);
+  const tag = tagMatch ? tagMatch[1] : '';
   // 剥离台词中的舞台指示（括号内的动作描写不是念出来的）
   content = content.replace(/（[^）]*）/g, '');
-  const isOS = dialogueLine.includes('OS：') || dialogueLine.includes('OS:')
-    || dialogueLine.includes('（旁白）：') || dialogueLine.includes('（画外音）：');
+  // 语速判断（优先级：呻吟 > 激动 > OS > 普通）
+  const isMoaning  = /呻吟|低吟|喘息|呜咽/.test(tag);
+  const isExcited  = !isMoaning && /激动|急促|恐慌|颤音|大喜|兴奋|着急|急切|慌乱|不耐烦|尖叫|怒吼/.test(tag);
+  const isOS       = !isMoaning && !isExcited && /OS|VO|旁白|画外音/.test(tag);
   // 去除标点、书名号计字数（《》不念）
   const charCount = content.replace(/[，。！？、""「」『』《》\s\.]/g, '').length;
-  // OS独白2字/秒，普通台词4字/秒（保守估算）
-  const speed = isOS ? 2 : 4;
+  // 语速：呻吟3字/秒，OS独白2字/秒，激动6字/秒，普通4字/秒
+  const speed = isMoaning ? 3 : isOS ? 2 : isExcited ? 6 : 4;
   // 停顿：逗号0.4秒，句末标点0.7秒
   const commas = (content.match(/[，、]/g) || []).length;
   const stops = (content.match(/[。！？]/g) || []).length;
@@ -969,20 +1029,9 @@ function buildPlanPrompt(scene, costumeCard, dialogues) {
   p += `   · 无第一层时：action_threads 写"无道具任务·写情绪肢体"，规划中仍须包含说话人肢体动作和听者身体反应的镜号\n`;
   p += `   · 说话人不能连续占两个以上镜号——说完就切到听者身体反应\n`;
 
-  // 武戏宏观弧线规划
+  // 武戏宏观弧线规划（方案A：直接读取 wuxi.txt 全文）
   if (scene.sceneType === 'wuxi') {
-    p += `\n⛔ 武戏整场弧线规划（强制）：\n`;
-    p += `一场完整武戏拆成多个15秒片段时，每个片段在整场弧线上扮演不同角色，强度不同：\n`;
-    p += `  · 开端·格局建立（强度：低）→ 交代谁和谁打、空间格局，五段式用蓄势+启动\n`;
-    p += `  · 第一回合·一方压制（强度：中）→ A方攻势占优，B方被动对抗，五段式用启动+爆发\n`;
-    p += `  · 战斗间隙·蓄力（强度：骤降）→ 情绪梳理、发现破绽、蓄力，五段式用余震→蓄势\n`;
-    p += `  · 第二回合·反击（强度：高）→ B方接招反击，势均力敌或逆转，五段式用蓄势→爆发\n`;
-    p += `  · 终极回合·全力释放（强度：最高）→ 双方底牌释放，最高强度，五段式用爆发+收尾+余震\n`;
-    p += `  · 余震落幕（强度：骤降）→ 见证结果，身体回响\n`;
-    p += `强度曲线：低→中→骤降→高→最高→落，不是直线冲上去的。\n`;
-    p += `⚠️ 每个片段必须填arc_position和intensity字段，标注该片段在弧线上的位置和强度。\n`;
-    p += `⚠️ 上一个片段的余震就是下一个片段的蓄势——片段之间情绪不能断线。\n`;
-    p += `⚠️ 没有"战斗间隙·蓄力"的武戏就没有层次——至少在一个片段的开头或末尾安排喘息段。\n\n`;
+    p += `\n【武戏专项规则·弧线规划】\n${WUXI_RULES}\n`;
   }
 
   // 导演讲戏模式：镜头清单约束
@@ -1167,25 +1216,44 @@ function validatePlan(plan, dialogues, limits, minSegments, relaxed = false) {
     }
   }
 
-  // 台词分配完整性 + 重复检测
-  // 先检测台词重复：同一句台词不能出现在多个片段
-  const dialogueSegmentCount = new Map(); // dialogue文本 → 出现次数
+  // 台词重复检测：AI 不能把同一句台词写进多个片段
+  // 用归一化锚点（前10字），同时排除剧本本身就有重复的台词（如连续两条相同的VO）
+  // ① 统计剧本中每条台词的锚点出现次数（用于区分"AI重复"vs"剧本本身重复"）
+  const dialogueAnchorCountInScript = new Map();
+  for (const d of dialogues) {
+    const colonIdx = d.indexOf('：');
+    const content = stripDirectorNote(
+      (colonIdx >= 0 ? d.substring(colonIdx + 1) : d)
+    ).trim().replace(QUOTE_STRIP_RE, '');
+    const anchor = normalizeDialogueForMatch(content).slice(0, 10);
+    if (anchor) dialogueAnchorCountInScript.set(anchor, (dialogueAnchorCountInScript.get(anchor) || 0) + 1);
+  }
+  // ② 统计 plan 中每个锚点出现在几个片段（不是几个镜号）
+  const segmentAnchors = new Map(); // anchor → Set<segmentId>
   for (const seg of plan.segments) {
     for (const shot of (seg.shots || [])) {
-      if (shot.dialogue && shot.dialogue.trim()) {
-        const key = shot.dialogue.trim();
-        dialogueSegmentCount.set(key, (dialogueSegmentCount.get(key) || 0) + 1);
+      if (!shot.dialogue || !shot.dialogue.trim()) continue;
+      const content = stripDirectorNote(shot.dialogue).trim().replace(QUOTE_STRIP_RE, '');
+      const anchor = normalizeDialogueForMatch(content).slice(0, 10);
+      if (anchor) {
+        if (!segmentAnchors.has(anchor)) segmentAnchors.set(anchor, new Set());
+        segmentAnchors.get(anchor).add(seg.id);
       }
     }
   }
-  const duplicateDialogues = [];
-  for (const [dlg, count] of dialogueSegmentCount) {
-    if (count > 1) {
-      duplicateDialogues.push(`台词"${dlg.slice(0, 20)}..."出现在${count}个片段，必须只出现在1个片段`);
+  // ③ AI 重复：锚点只出现1次在剧本中，却在2+片段出现 → 报错
+  const duplicateErrors = [];
+  for (const [anchor, segSet] of segmentAnchors) {
+    if (segSet.size > 1) {
+      const scriptCount = dialogueAnchorCountInScript.get(anchor) || 1;
+      if (scriptCount === 1) {
+        // 剧本里只出现1次，却在多个片段出现 → AI 重复
+        duplicateErrors.push(`台词锚点"${anchor}"在剧本仅1处，但AI写入了${segSet.size}个片段(${Array.from(segSet).join('、')})，必须只出现在1个片段`);
+      }
     }
   }
-  if (duplicateDialogues.length > 0) {
-    errors.push(`⚠️ 台词重复错误：${duplicateDialogues.join('；')}`);
+  if (duplicateErrors.length > 0) {
+    errors.push(`⚠️ 台词重复错误：${duplicateErrors.join('；')}`);
   }
 
   const allPlanned = plan.segments
@@ -1233,6 +1301,78 @@ function validatePlan(plan, dialogues, limits, minSegments, relaxed = false) {
   }
 
   return errors;
+}
+
+// ── 片段内容相似度检测（防止AI生成重复片段，如D和G内容高度重叠）────────────────────
+function validatePlanSegmentSimilarity(plan) {
+  const errors = [];
+
+  // 计算两个文本集合的 Jaccard 相似度（词级交集/并集）
+  function jaccardSim(textA, textB) {
+    const wordsA = new Set(textA.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, ' ').trim().split(/\s+/).filter(Boolean));
+    const wordsB = new Set(textB.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, ' ').trim().split(/\s+/).filter(Boolean));
+    if (wordsA.size === 0 || wordsB.size === 0) return 0;
+    let intersection = 0;
+    for (const w of wordsA) { if (wordsB.has(w)) intersection++; }
+    const union = wordsA.size + wordsB.size - intersection;
+    return union === 0 ? 0 : intersection / union;
+  }
+
+  // 提取片段特征文本：标题 + 所有镜号 task 的关键词拼接
+  const segSignatures = plan.segments.map(seg => {
+    const tasks = (seg.shots || []).map(s => `${s.task || ''} ${s.dialogue || ''}`).join(' ');
+    const title = seg.title || '';
+    const arc = seg.arc_position || '';
+    return `${title} ${arc} ${tasks}`;
+  });
+
+  // 检测相邻或相近片段的内容相似度
+  for (let i = 0; i < plan.segments.length; i++) {
+    for (let j = i + 1; j < plan.segments.length; j++) {
+      const sim = jaccardSim(segSignatures[i], segSignatures[j]);
+      if (sim >= 0.55) {
+        errors.push(`片段${plan.segments[i].id} 与片段${plan.segments[j].id} 内容高度相似（相似度${Math.round(sim * 100)}%），疑似重复片段，请重新规划`);
+      }
+    }
+  }
+
+  return errors;
+}
+
+// ── 规划唯一性校验（检测重复segment ID、台词被注入多个片段）───────────────────────────
+function validatePlanUniqueness(plan, dialogues) {
+  const warnings = [];
+
+  // 1. 检查 segment ID 唯一性（最可能导致"重复片段"输出）
+  const segIds = plan.segments.map(s => s.id);
+  const seenIds = new Set();
+  const dupIds = [];
+  for (const id of segIds) {
+    if (seenIds.has(id)) dupIds.push(id);
+    else seenIds.add(id);
+  }
+  if (dupIds.length > 0) {
+    warnings.push(`⚠️ 规划唯一性：segment ID 重复 → ${[...new Set(dupIds)].join(', ')}`);
+  }
+
+  // 2. 检查同一台词是否出现在多个片段（forceInject 误注入）
+  for (let dIdx = 0; dIdx < dialogues.length; dIdx++) {
+    const d = dialogues[dIdx];
+    const colonIdx = d.indexOf('：');
+    const content = stripDirectorNote(colonIdx >= 0 ? d.substring(colonIdx + 1) : d).trim();
+    const anchor = normalizeDialogueForMatch(content.slice(0, 10));
+    if (!anchor) continue;
+    let foundSegs = 0;
+    for (const seg of plan.segments) {
+      const segText = (seg.shots || []).map(s => s.dialogue || '').join('\n');
+      if (normalizeDialogueForMatch(segText).includes(anchor)) foundSegs++;
+    }
+    if (foundSegs > 1) {
+      warnings.push(`⚠️ 台词${dIdx + 1} 出现在 ${foundSegs} 个片段中：${d.slice(0, 25)}...`);
+    }
+  }
+
+  return warnings;
 }
 
 // ── 程序强制注入遗漏台词 ──────────────────────────────────────────────────────
@@ -1287,6 +1427,11 @@ function forceInjectMissingDialogues(plan, dialogues) {
   }
 
   // 2. 找出遗漏台词——使用与 validatePlan 完全相同的多锚点 + 归一化逻辑
+  //    ★ 修复：用整句归一化内容做全包含检测，防止重复注入
+  const plannedConcatFull = normalizeDialogueForMatch(plan.segments
+    .flatMap(s => s.shots || [])
+    .map(s => (s.dialogue || '').replace(QUOTE_STRIP_RE, ''))
+    .join('\n'));
   const missingIndices = [];
   for (let dIdx = 0; dIdx < dialogues.length; dIdx++) {
     const d = dialogues[dIdx];
@@ -1294,6 +1439,15 @@ function forceInjectMissingDialogues(plan, dialogues) {
     const contentFull = stripDirectorNote(
       (colonIdx >= 0 ? d.substring(colonIdx + 1) : d)
     ).trim().replace(QUOTE_STRIP_RE, '');
+    const contentNormFull = normalizeDialogueForMatch(contentFull);
+    // 整句归一化后做包含检测（比多锚点更严格，防止拆分后误判）
+    // ★ 修复：VO/旁白 台词不做 plannedConcatFull 检查
+    const isVOLine = /^(?:\(VO\)|（VO）|（旁白）|（画外音）|\(?\s*(?:VO|OS)\s*\)?\s*)[：:]/.test(d);
+    if (!isVOLine && contentNormFull && plannedConcatFull.includes(contentNormFull)) {
+      // 整句已在 plan 中，标记已分配，跳过
+      segForDialogue.set(dIdx, -1); // -1 表示已找到但不记录具体片段
+      continue;
+    }
     const clauses = contentFull.split(/(?<=[？！。])/g).map(s => s.trim()).filter(s => s.length >= 4);
     let isMissing;
     if (clauses.length > 1) {
@@ -1411,6 +1565,8 @@ function forceInjectMissingDialogues(plan, dialogues) {
 //    改顺序时务必保持"稳定前缀"完全字节级一致,任何不经意的 seg.id / segIndex
 //    泄漏到前缀都会让缓存失效。
 function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex, totalSegs, refA, allDialogues = []) {
+  // ── 清洗剧本原文：去掉（标注：...）（注：...）等导演注释独立行 ──
+  const cleanContent = scene.content.replace(/^（(?:标注|注|说明|批注|提示|技术|要求|导演|注意|特效|备注|附注)[：:][^\n]+\n?/gm, '').trim();
   // ✨ 片段级判类型：如果 segPlan 上挂了独立的 sceneType（来自片段级校验覆写），
   // 则使用 segPlan.sceneType 覆写本次调用的 scene.sceneType，这样规则块按片段类型注入。
   // 用浅拷贝避免污染原 scene 对象（scene 被所有片段共享）。
@@ -1512,49 +1668,33 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
   p += `   · 含台词的镜号必须在叙事正文里写出台词原文（动作状态+冒号+引号）。\n`;
   p += `   · 违反此规则=致命错误，输出作废。\n`;
   p += `3. OS独白必须以"角色OS：「引号原文」"格式写进对应镜号叙事正文。\n`;
+  p += `   · ⚠️ VO/画外音/旁白 台词严禁输出成独立的"（台词）：..."行——必须写进某个镜号的叙事正文里（如："刘秘书VO/OS：'喂，大少爷？'（从听筒传出）"）。\n`;
   p += `3b. 声画分离镜号（task含"声画分离"）：写纯画面叙事，开头注明"【声画分离】XX的OS/台词继续"，不重复写台词原文。画面按【文戏专项规则】规则十-补的三层优先级选择（①听者反应 ②说话者细节 ③空景环境）。\n`;
   p += `3d. 反应镜号（task含"反应"）：纯画面·写听者的表情变化、身体反应、沉默。不写台词。让对话有呼吸感，不要从一句台词直接跳到下一句。\n`;
   p += `4. C部分第一段第一句锚定入场景别和视角。\n`;
   p += `5. 最后一段最后一句锚定出场景别和视角，并标注接棒物。\n\n`;
 
-  // ── 武戏专属规则 ──
+  // ── 武戏专属规则（方案A：读取 wuxi.txt） ──
   if (scene.sceneType === 'wuxi') {
-    p += `\n【武戏专项规则】\n`;
-    p += `武1. 武戏三层缝合：第一层叙事+第二层镜头作为物理参与者（被力裹着走）+第三层（）材质物理反馈。（）内只写材质世界的物理反应——力从哪来·打到什么上·材质怎么形变·形变怎么扩散，不写情绪不写心理。\n`;
-    p += `武2. 武戏镜头允许大幅度运动——大特写到大全景、撞击式变焦、360度环绕、贴地疾驰、俯冲压下。镜头被动作的力拽着走。\n`;
-    p += `武3. 武戏五段式（蓄势→启动→爆发→收尾→余震）：每个镜号必须服务于五段式中的一个阶段，参考规划里 five_stage 字段。\n`;
-    p += `武4. 武戏（）写宏大物理破坏——金属交响·震荡波·材质粉碎·地面塌陷·血雾轨迹。\n`;
+    p += `\n【武戏专项规则】\n${WUXI_RULES}\n`;
   }
 
-  // ── 文戏专属规则 ──
+  // ── 文戏专属规则（方案A：读取 wenxi.txt 关键铁律 + 保留旧结构指令） ──
   if (scene.sceneType !== 'wuxi') {
-    p += `\n【文戏专项规则】（必须和 wenxi.txt 铁律 30 条 + 范例三/四/五对齐）\n`;
-    p += `文1. ⚠️ 动作线两层：第一层"道具任务"（吃饭/擦刀）来源是 AGENT_A 批注的【动作线设计】块或剧本原文；第二层"情绪驱动肢体"（往前走一步/转身/撑桌子/后退）是说话/听话时身体自然会做的事，必须写。批注的【动作线设计】里写"无道具任务"或没有该批注时，第一层不编，全靠第二层撑场面。\n`;
-    p += `文2. ⚠️ 听者身体反应：说话人说完立刻切走拍听者。听者是身体先动不是脸先动——上半身往后靠/手悬空/肩膀缩/笔掉了。说话人不能连续占两个以上镜号。\n`;
-    p += `文3. ⚠️ 台词三拍结构（重量台词必用）：情绪拐点句/决绝句/摊牌句/底牌句/情感爆发句必须写成三拍——拍一组织动作（台词前的物理动作·必须从情绪基线派生·决策者用"视线从 A 移到 B"·犹豫者才用"捏鼻梁/摸下巴"）+ 拍二伴随动作（说台词时的身体动作·一句话内有 2-3 个视线落点·中途换气）+ 拍三消化动作（台词后的物理反应·嘴唇抿紧/视线落下去/手放下）。⛔ 禁止"张嘴念完就闭嘴"的零拍台词——AI 视频模型看到零拍台词会生成成播音员念稿。\n`;
-    p += `文4. ⚠️ 动作情绪基线派生：每个动作必须从角色的情绪基线派生——决策者的动作偏硬精准有指令感（敲桌·视线锁定目标），犹豫者的动作偏软有拖拽感（捏鼻梁·摸下巴），承压方的动作内收退缩（肩缩·手扶桌借力）。禁止套通用模板"捏鼻梁=思考/搓手=紧张/握拳=愤怒"——这些对任何同类角色都成立，套到谁身上都不出戏。动笔前先回答：这个角色是谁？此刻在情绪基线的哪个位置？权力关系是施压还是承压？\n`;
-    p += `文5. ⚠️ 镜头运动克制：文戏镜头必须克制·单镜号内的空间跨度不能大·禁止武戏式的"大特写→大全景"戏剧性机位变化·禁止"极速拉远变焦"等大幅度运动。文戏镜头是低调的——推进半步·焦平面收紧·侧向平移·手持轻微抖动·停住见证。单镜号内允许硬切但节制（一般 2-3 个画面），切是为了让情绪落地，不是炫技。\n`;
-    p += `文6. ⚠️ 文戏默认 7 镜号：每个 15 秒文戏片段默认 7 个镜号（允许 5-8）·单镜 ≤3 秒·4 秒绝对不允许·3.5 秒也不允许，参考 wenxi.txt 范例三/四/五的规格。镜号头部格式："镜X  Xs · [景别] 复合运镜指令  焦段XXmm"。\n`;
-    p += `文7. ⚠️ 混合场景写法（本片段如果既有台词又有武戏动作）：按文戏规则写整个片段——武戏动作当作"大幅度的情绪驱动肢体"来写，镜头运动保持文戏克制（不做大特写→大全景），（）物理反馈可以偏武戏尺度（写刀锋冷光·格挡震动·衣料被气流带动）但不写宏大破坏。\n`;
-    p += `文8. ⚠️ 说话者视线路径（有台词镜号强制）：一句话内部必须有 2-3 个视线/头部落点——整句话盯着一个点说完会让 AI 生成表情冻住。\n`;
-    p += `     · 一对多场景：每句话看一个具体的听者·视线路径是"锁定目标"的弧线·最后闭环\n`;
-    p += `     · 一对一场景：80/30 配比（施压方 80% 锁定·承压方 30% 看对方 70% 躲避）\n`;
-    p += `     · 独白场景：视线必须有具体替身（大屏影像/墓碑/照片/窗外某点/镜子里的自己）不是虚空\n`;
-    p += `文9. ⚠️ 听者基线动作（双人同框镜号强制）：听者不能罚站·从镜1 第一秒起就有可见基线动作·反应必须是可见大动作。\n`;
-    p += `     · 基线动作范围：身体姿势可自编（扶桌·背手·插口袋·交叠手臂）；基线道具必须来自剧本或 B 服化道卡·不能瞎编\n`;
-    p += `     · 反应动作标准：抬头/扭头/低头/甩手/往后退半步/把手拿开/换重心/扶住某处借力（可见大动作）\n`;
-    p += `     · ⛔ 严禁微动作：喉结动/眉毛动/瞳孔变化/肌肉绷紧——AI 拍不出来观众看不见\n`;
-    p += `文10. ⚠️ 镜头方向铁律·同框对戏（双人/多人场景强制）：\n`;
-    p += `     · 两人对戏时听者必须在画面里以某种形式在场·禁止"对空气说话"\n`;
-    p += `     · 推荐构图（AI 友好）：说话者实焦·听者过肩虚焦给肩膀/衣服/衣领（不给头）\n`;
-    p += `     · ⛔ 禁止构图：说话者在前景虚焦不给头（AI 会混淆要不要对嘴·容易把台词处理成画外音）\n`;
-    p += `文11. ⚠️ 声画分离铁律（含台词镜号强制）：\n`;
-    p += `     · 声画分离 ≠ 画外音广播——角色永远在演"正在说话"这件事·即使画面焦点不在嘴上·身体也要有说话状态的外显表现\n`;
-    p += `     · 虚焦镜号的叙事必须写"嘴唇在虚焦里持续开合着"或"侧脸下颌线随说话节奏轻微起伏"或"肩膀随说话的呼吸节奏起伏着"\n`;
-    p += `     · 画面给到嘴 = 嘴和声音必须完全同步·禁止延迟对嘴\n`;
-    p += `     · ⛔ 禁止写法："【声画分离】XX 的声音从画外继续"——AI 会理解成角色像广播一样发声·身体静止\n`;
-    p += `     · ✓ 正确写法："【声画分离·画面聚焦 XX】前景角色在剪影里嘴唇持续开合着，侧脸下颌线随说话节奏轻微起伏，声音从前景传出：'台词原文'"\n`;
-    p += `     · 声画分离段结束后必须有 1.5 秒无台词缓冲镜号·让 AI 退出"画外音模式"\n`;
+    // 关键结构性指令（不能丢，wenxi.txt 里没有这些格式要求）
+    p += `\n【文戏专项规则】\n`;
+    p += `⚠️ 以下规则来自 wenxi.txt 铁律，与结构指令配合使用。\n\n`;
+    p += `${WENXI_RULES}\n\n`;
+    // 补充旧文1-文11中 wenxi.txt 没有的关键输出指令
+    p += `【文戏输出格式强制要求】（上述铁律必须通过以下格式体现）：\n`;
+    p += `文1. ⚠️ 台词三拍结构（重量台词必用）：情绪拐点句/决绝句/摊牌句/底牌句/情感爆发句必须写成三拍——拍一组织动作（台词前·视线从A移到B/停顿一拍）+ 拍二说台词（一句内有2-3个视线落点）+ 拍三消化动作（台词后身体反应）。⛔ 禁止"张嘴念完就闭嘴"的零拍台词。\n`;
+    p += `文2. ⚠️ 台词顺序铁律：台词必须按剧本顺序逐字使用，不允许打乱顺序。\n`;
+    p += `文2-1. ⚠️ 严禁跨镜号偷台词：镜N只能使用台词列表中第N句（或本片段规划分配给镜N的台词），禁止把后面镜号的台词提前写到前面镜号，也禁止把前面镜号的台词重复写到后面。每个镜号的台词内容必须唯一对应。\n`;
+    p += `文3. ⚠️ 镜号头部格式："镜X  Xs · [景别] 复合运镜指令  焦段XXmm"。三层缺一不可（叙事+运镜+（）物理反馈）。\n`;
+    p += `文4. ⚠️ 混合场景按文戏规则写——武戏动作当作"大幅度的情绪驱动肢体"，镜头保持克制。\n`;
+    p += `文5. ⚠️ 镜号内容唯一性：每个镜号的画面内容必须独特，禁止两个镜号描写完全相同的动作、状态或构图。相邻镜号必须有明确的视觉差异（景别/角度/焦段/主体至少一项不同）。\n`;
+    p += `文6. ⚠️ 台词时长匹配：带台词（含OS/VO/声画分离）的镜号，台词量必须与时长匹配。中文对白经验值：3-5字/秒。台词较长时，必须改为声画分离（VO继续+画面切其他）或拆分到多个镜号。2秒及以下的镜号，台词描述必须极简（≤10字）。\n`;
+
   }
 
   p += `\n⚠️ C部分禁止出现"导演""Agent""批注""强调"等内部术语。直接描写画面，不要说"导演强调的XX"。\n\n`;
@@ -1567,7 +1707,7 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
   p += `本场共${totalSegs}个片段。\n\n`;
 
   // 剧本原文（稳定，通常最大的一块）
-  p += `═══ AGENT_A 批注剧本（按规划施工，参考导演讲戏细节）═══\n${scene.content}\n\n`;
+  p += `═══ AGENT_A 批注剧本（按规划施工，参考导讲话戏细节）═══\n${cleanContent}\n\n`;
   p += `⚠️ 注意：剧本正文到此结束。以下【批注摘要】及 ═══ 分隔线是元数据，不要处理，只规划到最后一个片段结束即可。\n\n`;
 
   // 服化道卡（稳定）
@@ -1645,7 +1785,8 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
     }
   }
 
-  p += `请直接输出【${segPlan.id}】的完整提示词，包含@声明、【片段标题】、【A】【B】【C】【D】【E】【F】六个部分。不要输出其他片段。`;
+  p += `\n⚠️ 禁止输出任何元注释、解释性文字、压缩说明、AI思考过程、操作说明。只输出提示词正文（从【片段标题】开始，到【F】结束）。\n`;
+  p += `请直接输出【${segPlan.id}】的完整提示词，包含@声明、【片段标题】、【A】【B】【C】【D】【E】【F】六个部分。不要输出其他片段，不要输出任何说明文字。`;
   return p;
 }
 
@@ -1747,15 +1888,17 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
     console.log(`⚠️ ${scene.id} 规划JSON解析失败`);
   } else {
     const errors1 = validatePlan(plan1, dialogues, limits, minSegments);
-    if (errors1.length === 0) {
+    const simErrors1 = validatePlanSegmentSimilarity(plan1);
+    const allErrors1 = [...errors1, ...simErrors1];
+    if (allErrors1.length === 0) {
       console.log(`✓ ${scene.id} 规划通过，共${plan1.segments.length}个片段`);
       plan = plan1;
     } else {
-      // ── 结构性错误 → 带错误信息重新规划 ────────────────────
-      console.log(`⚠️ ${scene.id} 规划有结构问题，修正中：\n${errors1.join('\n')}`);
+      // ── 结构性错误 + 重复片段错误 → 带错误信息重新规划 ──────
+      console.log(`⚠️ ${scene.id} 规划有结构问题，修正中：\n${allErrors1.join('\n')}`);
       const fixPrompt = buildPlanPrompt(scene, costumeCard, dialogues)
         + `\n\n上次规划有以下结构错误，请修正后重新输出JSON：\n`
-        + errors1.map(e => `- ${e}`).join('\n');
+        + allErrors1.map(e => `- ${e}`).join('\n');
       const planText2 = await callAPI(planSystemPrompt, fixPrompt, config);
       let plan2 = parsePlan(planText2);
       if (plan2) plan2 = forceInjectMissingDialogues(plan2, dialogues);
@@ -1766,16 +1909,27 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
       } else {
         // 第二次验证放宽片段数（relaxed=true）
         const errors2 = validatePlan(plan2, dialogues, limits, minSegments, true);
-        if (errors2.length === 0) {
+        const simErrors2 = validatePlanSegmentSimilarity(plan2);
+        const allErrors2 = [...errors2, ...simErrors2];
+        if (allErrors2.length === 0) {
           console.log(`✓ ${scene.id} 修正规划通过，共${plan2.segments.length}个片段`);
           plan = plan2;
         } else {
           // 两次规划都有结构问题：选片段数更多的那个继续（台词都已注入，不再降级单次）
-          console.log(`⚠️ ${scene.id} 两次规划均有结构问题，取较优规划继续：\n${errors2.join('\n')}`);
+          console.log(`⚠️ ${scene.id} 两次规划均有结构问题，取较优规划继续：\n${allErrors2.join('\n')}`);
           plan = plan2.segments.length >= plan1.segments.length ? plan2 : plan1;
           console.log(`   → 使用 ${plan === plan2 ? 'plan2' : 'plan1'}（${plan.segments.length}个片段）`);
         }
       }
+    }
+  }
+
+  // ── 规划唯一性校验（检测重复segment ID、台词跨片段注入）─────
+  if (plan) {
+    const uniWarn = validatePlanUniqueness(plan, dialogues);
+    if (uniWarn.length > 0) {
+      console.warn(`⚠️ ${scene.id} 规划唯一性警告（不阻断）：`);
+      uniWarn.forEach(w => console.warn(`   ${w}`));
     }
   }
 
@@ -1881,13 +2035,29 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
         const missing2 = verifyDialogues(segDialogues, repaired);
         if (missing2.length > 0) {
           console.warn(`⚠️ ${seg.id} 补写后仍有 ${missing2.length} 条遗漏，强制注入...`);
-          // 把仍然遗漏的台词文本直接追加到 C 部分末尾（简单兜底）
-          const injectText = missing2.map(d => {
+          // ★ 修复：不再输出 (台词)：... 裸行，改为追加到【C】最后一个镜号的叙事里
+          let injectNarr = '';
+          missing2.forEach(d => {
             const ci = d.indexOf('：');
-            return ci >= 0 ? d : `（台词）：${d}`;
-          }).join('\n');
-          repaired = repaired.replace(/(?=【D】)/, `\n${injectText}\n`);
-          console.warn(`⚠️ ${seg.id} 强制注入 ${missing2.length} 条台词（不再调 API）`);
+            const charRaw = ci >= 0 ? d.substring(0, ci) : '';
+            const charName = charRaw.replace(/[（(]?(?:VO|旁白|画外音|OS)[）)]?\s*/g, '').trim();
+            const content = ci >= 0 ? d.substring(ci + 1).trim() : d;
+            const isVO = /^(?:（VO）|（旁白）|（画外音）|\(?\s*(?:VO|OS)\s*\)?\s*)[：:]/.test(d);
+            if (isVO) {
+              if (charName) {
+                injectNarr += `画外音：` + content + `（` + charName + `OS）\n`;
+              } else {
+                injectNarr += `画外音：` + content + `\n`;
+              }
+            } else if (charName) {
+              injectNarr += charName + `开口说："` + content + `"\n`;
+            } else {
+              injectNarr += `画外音："` + content + `"\n`;
+            }
+          });
+          // 追加到【C】最后一个镜号叙述之后、【D】之前
+          repaired = repaired.replace(/(?=【D】)/, `\n` + injectNarr + `\n`);
+          console.warn(`⚠️ ${seg.id} 强制注入 ${missing2.length} 条台词叙事（不再调 API）`);
         } else {
           console.log(`✓ ${seg.id} 台词补写后核验通过`);
         }
@@ -2253,6 +2423,7 @@ async function processSceneSingleShot(scene, costumeCard, config, job, sceneInde
   // 台词时长预算：程序算好直接给模型，不需要模型自己算
   if (dialogues.length > 0) {
     userMsg += `⛔ 程序预算：本场台词最短时长（含台词的镜号时长必须≥对应值）\n`;
+    userMsg += `  （语速规则：普通台词4字/秒；激动/急促/恐慌/颤音6字/秒；呻吟/喘息3字/秒；OS/VO独白2字/秒；逗号+0.4秒，句末。！？+0.7秒）\n`;
     dialogues.forEach((d, i) => {
       const min = calcMinDuration(d);
       userMsg += `[台词${i + 1}] ${d}  →  最短${min}秒\n`;
@@ -2277,6 +2448,7 @@ async function processSceneSingleShot(scene, costumeCard, config, job, sceneInde
   userMsg += `7. 【镜头意图】INSERT要求的特写画面，必须作为独立镜号出现在C部分，不得合并进其他镜号。\n`;
   userMsg += `8. 动笔写任何片段的C部分之前，必须先在analysis块【台词分配表】里逐条列出本片段所有台词和OS独白（包括原文），标注计划写入哪个镜号；写完后逐句回标"已在镜X使用"，有遗漏禁止输出。\n`;
   userMsg += `9. OS独白必须以"角色OS：引号原文"格式写进对应镜号叙事正文，不能只写画面描述而省略OS文字。\n`;
+  userMsg += `9b. ⚠️ VO/画外音/旁白 台词严禁输出成独立的"（台词）：..."行——必须写成"角色VO/OS：台词原文（从听筒/画外传出）"的形式，融入某个镜号的叙事正文里。\n`;
   userMsg += `10. ⚠️ 每个片段镜号时长之和不得超过15秒。台词多/导演指令多时增加片段数量，不要硬塞。\n`;
   userMsg += `11. ⚠️ 台词之间必须有反应镜头（1-2秒）：角色A说完后，不要直接接角色B的台词。中间插一个听者反应的镜号。反应镜头也占时间，装不下就多分一个片段。\n`;
   userMsg += `12. 导演批注里描述的具体动作不能改——"漂移甩尾"不能改成"直冲"。\n`;
@@ -2286,30 +2458,30 @@ async function processSceneSingleShot(scene, costumeCard, config, job, sceneInde
   userMsg += `16. 导演描述的连贯走位调度放在同一个片段，不拆开。\n`;
   userMsg += `17. ⚠️ 镜号格式铁律：每个镜号以 [景别] 开头·后接复合运镜指令·焦段写在镜号头部或描述里。${scene.sceneType === 'wuxi' ? '武戏用英文景别如 [大特写 (Extreme Close-up)]' : '文戏用中文景别如 [近景]·[中近景]·[过肩]'}。\n`;
   userMsg += `18. ⚠️ 三层缝合：第一层叙事+第二层摄影机运动（有情绪/力的理由）+第三层（）物理反馈，缺一不可。空壳镜号禁止输出。\n`;
+  userMsg += `19. ⚠️ 禁止输出任何元注释、解释性文字、压缩说明、AI思考过程、操作说明。只输出提示词正文。\n`;
+  userMsg += `20. ⚠️ 镜号内容唯一性：每个镜号的画面内容必须独特，禁止两个镜号描写完全相同的动作、状态或构图。相邻镜号必须有明确的视觉差异。\n`;
+  userMsg += `21. ⚠️ 台词时长匹配：带台词（含OS/VO）的镜号，台词量必须与时长匹配。中文对白约3-5字/秒。2秒及以下的镜号，台词必须极简。\n`;
 
-  // ── 武戏专属规则 ──
+  // ── 武戏专属规则（方案A：读取 wuxi.txt） ──
   if (scene.sceneType === 'wuxi') {
-    userMsg += `\n【武戏专项规则】\n`;
-    userMsg += `武1. 武戏（）写宏大物理破坏——金属交响·震荡波·材质粉碎·地面塌陷·血雾轨迹，不写情绪不写心理。\n`;
-    userMsg += `武2. 武戏镜头允许大幅度运动——大特写到大全景、撞击式变焦、360度环绕、贴地疾驰、俯冲压下。\n`;
-    userMsg += `武3. 武戏五段式（蓄势→启动→爆发→收尾→余震）：每个镜号必须服务于五段式中的一个阶段。\n`;
-    userMsg += `武4. 武戏每片段3-6个镜号，每镜2-4秒，冲击感优先。\n`;
+    userMsg += `\n【武戏专项规则】\n${WUXI_RULES}\n`;
   }
 
-  // ── 文戏专属规则（含混合场景）──
+  // ── 文戏专属规则（含混合场景）（方案A：读取 wenxi.txt + 保留旧结构指令） ──
   if (scene.sceneType !== 'wuxi') {
-    userMsg += `\n【文戏专项规则】（必须和 wenxi.txt 铁律 30 条 + 范例三/四/五对齐）\n`;
-    userMsg += `文1. ⚠️ 动作线两层：第一层"道具任务"（吃饭/擦刀）来源是 AGENT_A 批注的【动作线设计】块或剧本原文，不编；第二层"情绪驱动肢体"（往前走一步/转身/撑桌子）是人说话时身体自然会做的事，必须写。优先从【动作线设计】批注块提取每个角色的物理任务，没有该批注或写"无"时第一层留空。\n`;
-    userMsg += `文2. ⚠️ 听者身体反应：说话人说完立刻切走拍听者身体反应（上半身后靠/手停了/肩缩了），不是只拍脸。说话人不能连续占两个以上镜号。\n`;
-    userMsg += `文3. ⚠️ 台词三拍结构（重量台词必用）：情绪拐点句/决绝句/摊牌句必须写三拍——拍一组织动作（必须从情绪基线派生·决策者用"视线从 A 移到 B"·犹豫者才用"捏鼻梁/摸下巴"）+ 拍二说台词（含伴随动作·一句话 2-3 个视线落点）+ 拍三消化动作。⛔ 禁止"张嘴念完就闭嘴"的零拍台词。\n`;
-    userMsg += `文4. ⚠️ 动作情绪基线派生：每个动作从角色情绪基线派生，不套通用模板。决策者用敲桌不用捏鼻梁，承压方用扶桌借力不用握拳。\n`;
-    userMsg += `文5. ⚠️ 镜头运动克制：禁止大跨度镜头（大特写→大全景），文戏镜头是低调的——推进半步·焦平面收紧·侧向平移·手持轻微抖动。单镜号内允许硬切但节制。\n`;
-    userMsg += `文6. ⚠️ 文戏默认 7 镜号：每片段默认 7 个镜号（允许 5-8）·单镜 ≤3 秒·4 秒绝对不允许·3.5 秒也不允许，参考 wenxi.txt 范例三/四/五的规格。\n`;
-    userMsg += `文7. ⚠️ 混合场景写法（本片段如果既有台词又有武戏动作）：按文戏规则写整个片段——武戏动作当作"大幅度的情绪驱动肢体"来写，镜头运动保持文戏克制，（）物理反馈可以偏武戏尺度（写刀锋冷光·格挡震动·衣料被气流带动）但不写宏大破坏。\n`;
-    userMsg += `文8. ⚠️ 说话者视线路径（有台词镜号强制）：一句话内部必须有 2-3 个视线/头部落点——整句话盯着一个点说完会让 AI 生成表情冻住。一对多场景=每句话看一个具体听者形成锁定弧线最后闭环；一对一=80/30 配比（施压方 80% 锁定·承压方 30% 看对方）；独白=视线必须有具体替身（大屏/墓碑/照片）不是虚空。\n`;
-    userMsg += `文9. ⚠️ 听者基线动作（双人同框镜号强制）：听者不能罚站·从镜1 第一秒起就有可见基线动作（扶桌/扶柜/手插口袋/交叠手臂）·基线道具必须来自剧本或 B 服化道卡不能瞎编·反应必须是可见大动作（抬头/扭头/低头/扶桌/往后退半步）·⛔ 严禁微动作（喉结动/眉毛动/瞳孔变化）。\n`;
-    userMsg += `文10. ⚠️ 镜头方向铁律·同框对戏：两人对戏时听者必须在画面里（说话者实焦+听者过肩虚焦给肩膀/衣服不给头 = AI 友好构图）·⛔ 禁止单人特写拍说话者完全没有听者暗示（对空气说话）·⛔ 禁止说话者在前景虚焦不给头（AI 会混淆要不要对嘴）。\n`;
-    userMsg += `文11. ⚠️ 声画分离铁律：声画分离 ≠ 画外音·角色永远在演"正在说话"·虚焦镜号叙事必须写"嘴唇在虚焦里持续开合着"或"侧脸下颌线随说话节奏轻微起伏"·画面给到嘴 = 嘴和声音必须完全同步禁止延迟对嘴·声画分离段结束后必须有 1.5s 无台词缓冲镜号+短台词测试对嘴模式恢复·⛔ 禁止写"【声画分离】XX 的声音从画外继续"（AI 会让角色身体静止）·✓ 正确写"【声画分离·画面聚焦 XX】前景角色嘴唇持续开合着...声音从前景传出：'台词原文'"。\n`;
+    userMsg += `\n【文戏专项规则】\n`;
+    userMsg += `⚠️ 以下规则来自 wenxi.txt 铁律，与结构指令配合使用。\n\n`;
+    userMsg += `${WENXI_RULES}\n\n`;
+    // 补充旧文1-文11中 wenxi.txt 没有的关键输出指令
+    userMsg += `【文戏输出格式强制要求】（上述铁律必须通过以下格式体现）：\n`;
+    userMsg += `文1. ⚠️ 台词三拍结构（重量台词必用）：情绪拐点句/决绝句/摊牌句必须写三拍——拍一组织动作（台词前·视线从A移到B）+ 拍二说台词（一句话内有2-3个视线落点）+ 拍三消化动作（台词后身体反应）。⛔ 禁止"张嘴念完就闭嘴"。\n`;
+    userMsg += `文2. ⚠️ 台词顺序铁律：台词必须按剧本顺序逐字使用，禁止打乱顺序。\n`;
+    userMsg += `文2-1. ⚠️ 严禁跨镜号偷台词：镜N只能使用本镜号应用的台词，禁止把后面镜号的台词提前写到前面镜号，也禁止把前面镜号的台词重复写到后面。\n`;
+    userMsg += `文3. ⚠️ 听者身体反应：说话人说完立刻切走拍听者（上半身后靠/手停了/肩缩了），不是只拍脸。说话人不能连续占两个以上镜号。\n`;
+    userMsg += `文4. ⚠️ 混合场景按文戏规则写——武戏动作当作"情绪驱动肢体"，镜头保持克制。\n`;
+    userMsg += `文5. ⚠️ 镜号内容唯一性：每个镜号的画面内容必须独特，禁止两个镜号描写完全相同的动作、状态或构图。相邻镜号必须有明确的视觉差异（景别/角度/焦段/主体至少一项不同）。\n`;
+    userMsg += `文6. ⚠️ 台词时长匹配：带台词（含OS/VO/声画分离）的镜号，台词量必须与时长匹配。中文对白经验值：3-5字/秒。台词较长时，必须改为声画分离（VO继续+画面切其他）或拆分到多个镜号。2秒及以下的镜号，台词描述必须极简（≤10字）。\n`;
+
   }
 
   // 检测转场指令
@@ -2339,6 +2511,7 @@ async function processSceneSingleShot(scene, costumeCard, config, job, sceneInde
   if (costumeCard && costumeCard.trim()) {
     userMsg += `═══ AGENT_B 服化道卡 ═══\n${costumeCard}\n\n`;
   }
+  userMsg += `\n⚠️ 禁止输出任何元注释、解释性文字、压缩说明、AI思考过程、操作说明。只输出提示词正文。\n`;
   userMsg += `请直接输出所有15秒片段的完整提示词，台词多时自动拆分，全部片段一次性输出。`;
 
   let result = await callAPI(systemPrompt, userMsg, config);
@@ -2607,7 +2780,12 @@ function parseRawScript(text) {
       const lm = hdr.match(/[内外]\s+(.+)$/) || hdr.match(/(?:外|内)\s*(.+)/);
       cur = { id: sid, header: hdr, location: lm ? lm[1].trim() : hdr, content: t, characters: [], episode: ep };
     } else if (cur) {
-      cur.content += '\n' + line;
+      // 跳过（标注：...）（注：...）等导演注释独立行，不进入 scene.content
+      const trimmed = line.trim();
+      const isAnnotation = /^（(?:标注|注|说明|批注|提示|技术|要求|导演|注意|特效|备注|附注)[：:]/.test(trimmed);
+      if (!isAnnotation) {
+        cur.content += '\n' + line;
+      }
       const cm = t.match(/^人物[：:]\s*(.+)/);
       if (cm) cur.characters = cm[1].split(/[·，,、\s]+/).map(c => c.trim()).filter(Boolean);
     }
@@ -2633,8 +2811,11 @@ function extractRawDialogues(sc) {
 // ── 规划阶段 ──────────────────────────────────────────────
 
 function buildAnnotationPlanPrompt(scene, allScenes, soulCard, prevFeel) {
-  const origDL = extractRawDialogues(scene.content);
-  const origAct = scene.content.match(/^▲.+$/gm) || [];
+  // 清洗剧本原文：去掉（标注：...）（注：...）等导演注释独立行
+  const ANN_RE = /^（标注|注|说明|批注|提示|技术|要求|导演|注意|特效|备注|附注）[：:]/;
+  const cleanSceneContent = scene.content.replace(ANN_RE, '').trim();
+  const origDL = extractRawDialogues(cleanSceneContent);
+  const origAct = cleanSceneContent.match(/^▲.+$/gm) || [];
   const sceneList = allScenes.map(s => s.id + ' ' + s.header).join('\n');
 
   let p = '你是批注规划专员，只做规划，不写批注正文。\n\n';

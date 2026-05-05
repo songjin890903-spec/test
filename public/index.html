@@ -1174,7 +1174,17 @@ async function fetchGenerateResults(jobId, resultEl, mode) {
   try {
     const res = await fetch(`/api/results/${jobId}`);
     const data = await res.json();
-    if (!data.results?.length) return;
+    // ⚠️ 修复：即使 results 为空，也要保存 jobId，否则下载功能拿不到 jobId
+    if (mode === 'direct') directState.jobId = jobId;
+    else agentAState.generateJobId = jobId;
+
+    if (!data.results?.length) {
+      resultEl.innerHTML = `<div class="status status-loading">结果尚未就绪，正在等待...</div>`;
+      resultEl.classList.remove('hidden');
+      // 1秒后重试
+      setTimeout(() => fetchGenerateResults(jobId, resultEl, mode), 1000);
+      return;
+    }
 
     if (mode === 'direct') {
       document.getElementById('directResults').classList.remove('hidden');
@@ -1238,6 +1248,7 @@ async function fetchGenerateResults(jobId, resultEl, mode) {
     resultEl.classList.remove('hidden');
 
     window._generateResults = results;
+    window._currentJobId = jobId;
     if (mode === 'direct') directState.jobId = jobId;
     else agentAState.generateJobId = jobId;
 
@@ -1463,8 +1474,10 @@ function copyAllClean(event) {
 }
 
 function downloadResults(type) {
-  const jobId = currentMode === 'direct' ? directState.jobId : agentAState.generateJobId;
-  if (!jobId) return;
+  // 优先用参数，其次从全局状态取
+  const jobId = window._currentJobId
+    || (currentMode === 'direct' ? directState.jobId : agentAState.generateJobId);
+  if (!jobId) { alert('暂无生成任务，请先生成提示词。'); return; }
   const endpoint = type === 'clean' ? `/api/download-prompts/${jobId}` : `/api/download/${jobId}`;
   window.open(endpoint, '_blank');
 }
