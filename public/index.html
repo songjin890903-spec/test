@@ -149,7 +149,7 @@ textarea { resize: vertical; min-height: 80px; }
 <!-- 共享布局组件 -->
 <script src="/components/layout.js"></script>
 
-<div id="pageContent" class="container" style="display:none;">
+<div id="pageContent" class="container">
   <h1>🎬 视频提示词生成工具</h1>
   <p class="subtitle">Agent A 剧本分析（AI自动/导演讲戏）→ Agent C 分镜提示词</p>
 
@@ -402,27 +402,29 @@ let directState = {
     const res = await fetch('/api/auth/me');
     if (!res.ok) { window.location.href = '/login.html'; return; }
     const user = await res.json();
-    renderUserInfo(user);
-  } catch (_) { window.location.href = '/login.html'; return; }
-  document.getElementById('pageContent').style.display = 'block';
-})();
-
-function renderUserInfo(user) {
-  const avatar = document.getElementById('userAvatar');
-  const name = document.getElementById('userName');
-  const role = document.getElementById('userRole');
-  if (avatar) avatar.textContent = user.username ? user.username.charAt(0).toUpperCase() : '?';
-  if (name) name.textContent = user.username || '未知用户';
-  if (role) {
-    if (user.isAdmin) {
-      role.textContent = '管理员';
-      role.className = 'user-role admin';
-    } else {
-      role.textContent = '普通用户';
-      role.className = 'user-role';
+    const avatar = document.getElementById('userAvatar');
+    const name = document.getElementById('userName');
+    const role = document.getElementById('userRole');
+    if (avatar) avatar.textContent = user.username ? user.username.charAt(0).toUpperCase() : '?';
+    if (name) name.textContent = user.username || '未知用户';
+    if (role) {
+      if (user.isAdmin) {
+        role.textContent = '管理员';
+        role.className = 'user-role admin';
+      } else {
+        role.textContent = '普通用户';
+        role.className = 'user-role';
+      }
     }
+  } catch (_) { window.location.href = '/login.html'; return; }
+
+  const mainContent = document.getElementById('mainContent');
+  const pageContent = document.getElementById('pageContent');
+  if (mainContent && pageContent) {
+    mainContent.appendChild(pageContent);
+    pageContent.style.display = 'block';
   }
-}
+})();
 
 // ============================================================
 // 工具函数
