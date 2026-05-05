@@ -731,7 +731,7 @@ async function callAPI(systemPrompt, userMessage, config) {
           },
           body: JSON.stringify({
             model: model || 'claude-sonnet-4-6',
-            max_tokens: 8192,
+            max_tokens: 16384,
             system: systemPrompt,
             messages
           }),
@@ -776,7 +776,7 @@ async function callAPI(systemPrompt, userMessage, config) {
           body: JSON.stringify({
             systemInstruction: { parts: [{ text: systemPrompt }] },
             contents,
-            generationConfig: { maxOutputTokens: 8192 }
+            generationConfig: { maxOutputTokens: 16384 }
           }),
           signal: controller.signal
         });
@@ -810,13 +810,13 @@ async function callAPI(systemPrompt, userMessage, config) {
           ? {
               // MiniMax OpenAI 兼容接口
               model: model || 'MiniMax-M2',
-              max_completion_tokens: config.maxTokens || 8192,
+              max_completion_tokens: config.maxTokens || 16384,
               temperature: 0.3,
               messages: [{ role: 'system', content: systemPrompt }, ...messages]
             }
           : {
               model: model || 'deepseek-chat',
-              max_tokens: 8192,
+              max_tokens: 16384,
               temperature: 0.3,
               messages: [{ role: 'system', content: systemPrompt }, ...messages]
             };
