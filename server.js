@@ -1565,6 +1565,8 @@ function forceInjectMissingDialogues(plan, dialogues) {
 //    改顺序时务必保持"稳定前缀"完全字节级一致,任何不经意的 seg.id / segIndex
 //    泄漏到前缀都会让缓存失效。
 function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex, totalSegs, refA, allDialogues = []) {
+  // ── 清洗剧本原文：去掉（标注：...）（注：...）等导演注释独立行 ──
+  const cleanContent = scene.content.replace(/^（(?:标注|注|说明|批注|提示|技术|要求|导演|注意|特效|备注|附注)[：:][^\n]+\n?/gm, '').trim();
   // ✨ 片段级判类型：如果 segPlan 上挂了独立的 sceneType（来自片段级校验覆写），
   // 则使用 segPlan.sceneType 覆写本次调用的 scene.sceneType，这样规则块按片段类型注入。
   // 用浅拷贝避免污染原 scene 对象（scene 被所有片段共享）。
@@ -1705,7 +1707,7 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
   p += `本场共${totalSegs}个片段。\n\n`;
 
   // 剧本原文（稳定，通常最大的一块）
-  p += `═══ AGENT_A 批注剧本（按规划施工，参考导演讲戏细节）═══\n${scene.content}\n\n`;
+  p += `═══ AGENT_A 批注剧本（按规划施工，参考导讲话戏细节）═══\n${cleanContent}\n\n`;
   p += `⚠️ 注意：剧本正文到此结束。以下【批注摘要】及 ═══ 分隔线是元数据，不要处理，只规划到最后一个片段结束即可。\n\n`;
 
   // 服化道卡（稳定）
@@ -2778,7 +2780,12 @@ function parseRawScript(text) {
       const lm = hdr.match(/[内外]\s+(.+)$/) || hdr.match(/(?:外|内)\s*(.+)/);
       cur = { id: sid, header: hdr, location: lm ? lm[1].trim() : hdr, content: t, characters: [], episode: ep };
     } else if (cur) {
-      cur.content += '\n' + line;
+      // 跳过（标注：...）（注：...）等导演注释独立行，不进入 scene.content
+      const trimmed = line.trim();
+      const isAnnotation = /^（(?:标注|注|说明|批注|提示|技术|要求|导演|注意|特效|备注|附注)[：:]/.test(trimmed);
+      if (!isAnnotation) {
+        cur.content += '\n' + line;
+      }
       const cm = t.match(/^人物[：:]\s*(.+)/);
       if (cm) cur.characters = cm[1].split(/[·，,、\s]+/).map(c => c.trim()).filter(Boolean);
     }
@@ -2804,8 +2811,11 @@ function extractRawDialogues(sc) {
 // ── 规划阶段 ──────────────────────────────────────────────
 
 function buildAnnotationPlanPrompt(scene, allScenes, soulCard, prevFeel) {
-  const origDL = extractRawDialogues(scene.content);
-  const origAct = scene.content.match(/^▲.+$/gm) || [];
+  // 清洗剧本原文：去掉（标注：...）（注：...）等导演注释独立行
+  const ANN_RE = /^（标注|注|说明|批注|提示|技术|要求|导演|注意|特效|备注|附注）[：:]/;
+  const cleanSceneContent = scene.content.replace(ANN_RE, '').trim();
+  const origDL = extractRawDialogues(cleanSceneContent);
+  const origAct = cleanSceneContent.match(/^▲.+$/gm) || [];
   const sceneList = allScenes.map(s => s.id + ' ' + s.header).join('\n');
 
   let p = '你是批注规划专员，只做规划，不写批注正文。\n\n';
