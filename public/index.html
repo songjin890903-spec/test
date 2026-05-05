@@ -4,11 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>视频提示词生成工具</title>
+<link rel="stylesheet" href="/components/layout.css">
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #0f1117; color: #e0e0e0; min-height: 100vh; }
-
-.container { max-width: 960px; margin: 0 auto; padding: 20px 16px 60px; }
+#layoutContainer { flex:1; display:flex; min-height:100vh; width:100%; }
+#mainContent { flex:1; overflow-y:auto; }
+.container { padding: 20px 16px 60px; }
 h1 { font-size: 22px; font-weight: 600; text-align: center; margin: 20px 0 8px; color: #fff; }
 .subtitle { text-align: center; font-size: 13px; color: #888; margin-bottom: 24px; }
 
@@ -141,7 +143,13 @@ textarea { resize: vertical; min-height: 80px; }
 </style>
 </head>
 <body>
-<div class="container">
+
+<div id="layoutContainer"></div>
+
+<!-- 共享布局组件 -->
+<script src="/components/layout.html"></script>
+
+<div id="pageContent" class="container" style="display:none;">
   <h1>🎬 视频提示词生成工具</h1>
   <p class="subtitle">Agent A 剧本分析（AI自动/导演讲戏）→ Agent C 分镜提示词</p>
 
@@ -386,14 +394,35 @@ let directState = {
 };
 
 // ============================================================
-// 登录验证
+// 登录验证 + 初始化
 // ============================================================
 (async function init() {
+  renderLayout('layoutContainer', 'tool');
   try {
     const res = await fetch('/api/auth/me');
     if (!res.ok) { window.location.href = '/login.html'; return; }
-  } catch (_) { window.location.href = '/login.html'; }
+    const user = await res.json();
+    renderUserInfo(user);
+  } catch (_) { window.location.href = '/login.html'; return; }
+  document.getElementById('pageContent').style.display = 'block';
 })();
+
+function renderUserInfo(user) {
+  const avatar = document.getElementById('userAvatar');
+  const name = document.getElementById('userName');
+  const role = document.getElementById('userRole');
+  if (avatar) avatar.textContent = user.username ? user.username.charAt(0).toUpperCase() : '?';
+  if (name) name.textContent = user.username || '未知用户';
+  if (role) {
+    if (user.isAdmin) {
+      role.textContent = '管理员';
+      role.className = 'user-role admin';
+    } else {
+      role.textContent = '普通用户';
+      role.className = 'user-role';
+    }
+  }
+}
 
 // ============================================================
 // 工具函数
