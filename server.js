@@ -1442,7 +1442,7 @@ function forceInjectMissingDialogues(plan, dialogues) {
     const contentNormFull = normalizeDialogueForMatch(contentFull);
     // 整句归一化后做包含检测（比多锚点更严格，防止拆分后误判）
     // ★ 修复：VO/旁白 台词不做 plannedConcatFull 检查
-    const isVOLine = /^(?:\(VO\)|（旁白）|（画外音）|\(?\s*(?:VO|OS)\s*\)?\s*)[：:]/.test(d);
+    const isVOLine = /^(?:\(VO\)|（VO）|（旁白）|（画外音）|\(?\s*(?:VO|OS)\s*\)?\s*)[：:]/.test(d);
     if (!isVOLine && contentNormFull && plannedConcatFull.includes(contentNormFull)) {
       // 整句已在 plan 中，标记已分配，跳过
       segForDialogue.set(dIdx, -1); // -1 表示已找到但不记录具体片段
