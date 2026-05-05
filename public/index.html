@@ -386,6 +386,16 @@ let directState = {
 };
 
 // ============================================================
+// 登录验证
+// ============================================================
+(async function init() {
+  try {
+    const res = await fetch('/api/auth/me');
+    if (!res.ok) { window.location.href = '/login.html'; return; }
+  } catch (_) { window.location.href = '/login.html'; }
+})();
+
+// ============================================================
 // 工具函数
 // ============================================================
 function getConfig() {
