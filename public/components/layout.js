@@ -1,4 +1,3 @@
-<script>
 /* ============================================================
    共享布局组件 - sidebar + topbar
    ============================================================ */
@@ -20,8 +19,8 @@ function renderLayout(containerId, activeNav) {
       </a>
       <nav class="sidebar-nav">
         <div class="nav-section-label">功能菜单</div>
-        <a href="/index.html" class="nav-item ${activeNav === 'tool' ? 'active' : ''}" onclick="highlightCurrentNav(this)">✨ 生成提示词</a>
-        <a href="/admin.html" class="nav-item ${activeNav === 'account' ? 'active' : ''}" onclick="highlightCurrentNav(this)">👤 账号管理</a>
+        <a href="/index.html" class="nav-item ${activeNav === 'tool' ? 'active' : ''}">✨ 生成提示词</a>
+        <a href="/admin.html" class="nav-item ${activeNav === 'account' ? 'active' : ''}">👤 账号管理</a>
       </nav>
     </div>
 
@@ -45,11 +44,6 @@ function renderLayout(containerId, activeNav) {
       </div>
     </div>
   `;
-}
-
-// 高亮当前导航（通过 URL 判断）
-function highlightCurrentNav(el) {
-  // 导航高亮由 renderLayout 的 activeNav 参数控制
 }
 
 // 切换下拉菜单
@@ -78,11 +72,11 @@ async function loadCurrentUser() {
       return null;
     }
     const user = await res.json();
-    
+
     const avatar = document.getElementById('userAvatar');
     const name = document.getElementById('userName');
     const role = document.getElementById('userRole');
-    
+
     if (avatar) avatar.textContent = user.username ? user.username.charAt(0).toUpperCase() : '?';
     if (name) name.textContent = user.username || '未知用户';
     if (role) {
@@ -94,7 +88,7 @@ async function loadCurrentUser() {
         role.className = 'user-role';
       }
     }
-    
+
     return user;
   } catch (err) {
     console.error('加载用户信息失败:', err);
@@ -118,4 +112,3 @@ function openChangePassword() {
   // 子类可覆盖此方法
   alert('请在账号管理页面修改密码');
 }
-</script>
