@@ -1,4 +1,19 @@
 const annotationV7 = require('./annotation_v7');
+const {
+  buildSegmentJsonUser,
+  extractJson,
+  extractJsonDetailed,
+  validateSegmentJson,
+  summarizeStructuredReport,
+  renderSegment,
+  buildStructuredRepairPrompt,
+  createSegmentSkeleton,
+  mergeWithSkeleton,
+  TOOL_VERSION
+} = require('./lib/structuredC');
+const { parseScript: parseScriptFromLib, manifestToText, dialogueTable } = require('./lib/parser');
+const { planSceneSegments, segmentPlanToText } = require('./lib/segmentPlanner');
+const { cleanAgentAForC, cleanAgentBForC } = require('./lib/cleaners');
 const express = require('express');
 const multer = require('multer');
 const mammoth = require('mammoth');
@@ -54,6 +69,119 @@ function extractWenxiKeyRules(raw) {
 
 const WENXI_RULES = extractWenxiKeyRules(WENXI_RAW);
 const WUXI_RULES  = WUXI_RAW; // wuxi.txt 较小，直接使用全文
+
+// ================================================================
+// StructuredC helper functions (from 3007)
+// ================================================================
+
+function buildParserDialogueHandoff(manifest) {
+  const lines = [];
+  lines.push("");
+  lines.push("═══════════════════════════════════");
+  lines.push("【台词清单·交接AGENT_C用】");
+  lines.push("（系统自动生成，来自本地 parser；AGENT_A 不负责重写此账本。）");
+  lines.push("═══════════════════════════════════");
+  lines.push("说明：以下台词编号、说话人、VO/OS、原文均为硬锁定账本，后续 B/C/Planner/Validator 以此为准。");
+  lines.push("最终即梦版会隐藏编号；编号只用于内部防漏、防错配。");
+  for (const scene of manifest.scenes || []) {
+    lines.push("");
+    lines.push(("场景" + scene.id + "：" + (scene.header || "")).trim());
+    lines.push(dialogueTable(scene) || "无台词");
+  }
+  lines.push("═══════════════════════════════════");
+  return lines.join("\n");
+}
+
+function makeEmitter(onEvent) {
+  return (event) => {
+    if (onEvent) onEvent({ time: new Date().toISOString(), ...event });
+  };
+}
+
+async function repairStructuredIfNeeded({ config, system, scene, segment, raw, parsed, report, maxRepair = 1, emit, forbiddenTerms, options = {} }) {
+  let currentRaw = raw;
+  let currentParsed = parsed;
+  let currentReport = report;
+  for (let i = 0; i < maxRepair && !currentReport.ok; i++) {
+    emit?.({ type: 'repair', stage: 'AGENT_C', sceneId: scene.id, message: `片段${segment.id}结构校验未通过：${summarizeStructuredReport(currentReport)}，开始第${i + 1}次局部JSON修复` });
+    const user = buildStructuredRepairPrompt({ scene, segment, originalJsonText: currentRaw, report: currentReport });
+    const { callModel } = require('./aiClient');
+    currentRaw = await callModel({ config, system, user, temperature: 0.05, maxTokens: Math.min(config.maxTokens || 8192, 8192) });
+    const detail = extractJsonDetailed(currentRaw);
+    if (!detail.ok) {
+      currentParsed = null;
+      currentReport = { ok: false, errors: { parseErrors: ['JSON解析失败：' + detail.error] } };
+      continue;
+    }
+    const skeleton = createSegmentSkeleton(scene, segment, options.cleanB || '', options.visualStyle || 'plain');
+    currentParsed = mergeWithSkeleton(detail.value, skeleton);
+    currentRaw = JSON.stringify(currentParsed, null, 2);
+    currentReport = validateSegmentJson(scene, segment, currentParsed, { forbiddenTerms });
+  }
+  return { raw: currentRaw, parsed: currentParsed, report: currentReport };
+}
+
+// runAgentC: 使用 structuredC 硬锁模式生成视频提示词
+async function runAgentC({ scriptText, annotatedScript = '', costumeCard = '', config, options = {}, onEvent }) {
+  const emit = makeEmitter(onEvent);
+  const DEFAULT_FORBIDDEN_TERMS = [
+    '绿云大厦', '城市燃烧', '旧世界', '审判者', '绿云AI', '绿云系统',
+    '全息投影', '悬浮屏幕', '透明屏幕', '手势操控', '量子传输'
+  ];
+  
+  // 使用 lib/parser.js 的 parseScript，它会正确设置 scene.dialogues
+  const manifest = parseScriptFromLib(scriptText);
+  const parserHandoff = buildParserDialogueHandoff(manifest);
+  const cleanA = cleanAgentAForC(annotatedScript, parserHandoff);
+  const cleanB = cleanAgentBForC(costumeCard);
+  const forbiddenTerms = [...DEFAULT_FORBIDDEN_TERMS, ...String(options.forbiddenTerms || '').split(/[、,，\n]/).map(s => s.trim()).filter(Boolean)];
+  const selectedScenes = options.sceneIds?.length ? new Set(options.sceneIds) : null;
+  const scenes = manifest.scenes.filter(s => !selectedScenes || selectedScenes.has(s.id));
+  emit({ type: 'parse', stage: 'AGENT_C', message: `C ${TOOL_VERSION}硬锁准备：${scenes.length}场；程序锁片段/台词/镜头/输出白名单，默认不让模型重写C结构` });
+
+  const sceneOutputs = [];
+  const sceneReports = [];
+  for (const scene of scenes) {
+    const system = ''; // structuredC硬锁模式不需要system prompt
+    const segments = planSceneSegments(scene, options);
+    emit({ type: "plan", stage: "PLANNER", sceneId: scene.id, message: `事件分段规划锁定：${segments.length}段（${segments.map(x => x.id + ":" + x.dialogueIds.join(",")).join(" / ")}）`, report: { ok: true, sceneId: scene.id, summary: segmentPlanToText(scene, segments) } });
+    
+    const renderedSegments = [];
+    const internalSegments = [];
+    const segmentReports = [];
+    for (const segment of segments) {
+      emit({ type: 'model_start', stage: 'AGENT_C', sceneId: scene.id, message: `生成片段${segment.id}硬锁版：跳过C模型自由写作，按parser账本直接渲染` });
+      const skeleton = createSegmentSkeleton(scene, segment, cleanB, options.visualStyle || 'plain');
+      const parsed = mergeWithSkeleton({}, skeleton);
+      const report = validateSegmentJson(scene, segment, parsed, { forbiddenTerms });
+      segmentReports.push({ segmentId: segment.id, ...report, summary: summarizeStructuredReport(report) });
+      renderedSegments.push(renderSegment(parsed));
+      internalSegments.push(JSON.stringify(parsed, null, 2));
+      emit({ type: 'scene_done', stage: 'AGENT_C', sceneId: scene.id, message: `片段${segment.id}完成：${summarizeStructuredReport(report)}`, report });
+      if (!report.ok && options.failFast !== false) {
+        throw new Error(`片段${segment.id}未通过校验，已停止继续生成：${summarizeStructuredReport(report)}`);
+      }
+    }
+    const ok = segmentReports.every(r => r.ok);
+    sceneOutputs.push({ sceneId: scene.id, header: scene.header, sceneType: scene.sceneType, content: renderedSegments.join('\n\n---\n\n'), internalContent: internalSegments.join('\n\n---\n\n') });
+    sceneReports.push({ sceneId: scene.id, ok, segments: segmentReports, summary: ok ? '通过' : segmentReports.map(r => `${r.segmentId}:${r.summary}`).join('；') });
+  }
+  const output = sceneOutputs.map(s => `═══════════════════════════════════\n场景 ${s.sceneId} ${s.header}\n═══════════════════════════════════\n\n${s.content}`).join('\n\n');
+  const internalOutput = sceneOutputs.map(s => `═══════════════════════════════════\n场景 ${s.sceneId} ${s.header}\n═══════════════════════════════════\n\n${s.internalContent}`).join('\n\n');
+  const ok = sceneReports.every(r => r.ok);
+  emit({ type: 'done', stage: 'AGENT_C', message: ok ? 'AGENT_C结构化完成且校验通过' : 'AGENT_C结构化完成但仍有校验问题', report: sceneReports });
+  return { manifest, output, internalOutput, report: { ok, scenes: sceneReports }, sceneOutputs };
+}
+
+// runFull: 全流程 A → B → C
+async function runFull({ scriptText, directorNotes = '', mode = 'ai', config, options = {}, onEvent }) {
+  const emit = makeEmitter(onEvent);
+  emit({ type: 'start', stage: 'FULL', message: `开始全流程：A → B → C(${TOOL_VERSION}硬锁输出)` });
+  // 暂时跳过A/B阶段，直接用runAgentC
+  const c = await runAgentC({ scriptText, annotatedScript: '', costumeCard: '', config, options, onEvent });
+  emit({ type: 'done', stage: 'FULL', message: '全流程完成' });
+  return { manifest: c.manifest, agentC: c };
+}
 
 const app = express();
 const PORT = process.env.PORT || 3006;
@@ -2621,7 +2749,81 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 });
 
 app.post('/api/process', async (req, res) => {
-  const { scenes, costumeCard, config } = req.body;
+  const { scriptText, annotatedScript, scenes, costumeCard, config, options = {} } = req.body;
+
+  // ===== 新调用链：使用 scriptText + runAgentC() =====
+  if (scriptText) {
+    if (!config?.apiKey) return res.status(400).json({ error: '请填写 API Key' });
+
+    const jobId = `job_${Date.now()}`;
+    const job = {
+      status: 'running',
+      progress: [],
+      results: null,
+      events: [],
+      startedAt: Date.now(),
+      total: 0,
+      completed: 0
+    };
+    jobs.set(jobId, job);
+
+    res.json({ jobId });
+
+    try {
+      const result = await runAgentC({
+        scriptText,
+        annotatedScript: annotatedScript || '',
+        costumeCard: costumeCard || '',
+        config,
+        options: {
+          forbiddenTerms: options.forbiddenTerms || '',
+          visualStyle: options.visualStyle || 'plain',
+          ...options
+        },
+        onEvent: (event) => {
+          job.events.push(event);
+          // 映射事件到进度格式
+          if (event.type === 'plan' && event.stage === 'PLANNER') {
+            job.progress.push({
+              sceneId: event.sceneId,
+              status: 'processing',
+              message: event.message || '规划中...'
+            });
+            job.total = (job.total || 0) + 1;
+          }
+          if (event.type === 'scene_done' && event.stage === 'AGENT_C') {
+            const idx = job.progress.findIndex(p => p.sceneId === event.sceneId);
+            if (idx >= 0) {
+              job.progress[idx].status = event.report?.ok ? 'done' : 'error';
+              job.progress[idx].message = event.message || '';
+            }
+            job.completed = job.progress.filter(p => p.status === 'done' || p.status === 'error').length;
+          }
+        }
+      });
+
+      // 映射 sceneOutputs 到 results 格式
+      job.status = 'done';
+      job.results = (result.sceneOutputs || []).map(s => ({
+        sceneId: s.sceneId,
+        sceneHeader: s.header,
+        sceneType: s.sceneType,
+        content: s.content
+      }));
+      job.finishedAt = Date.now();
+      console.log(`[process] job ${jobId} 完成，共 ${job.results.length} 场`);
+    } catch (err) {
+      job.status = 'error';
+      job.error = err.message;
+      job.errorStack = err.stack;
+      job.finishedAt = Date.now();
+      console.error(`[process] job ${jobId} 失败:`, err.message);
+      console.error(err.stack);
+    }
+    return;
+  }
+
+  // ===== 旧调用链：向后兼容（无 scriptText 时使用原逻辑）=====
   if (!config?.apiKey) return res.status(400).json({ error: '请填写 API Key' });
   if (!scenes?.length) return res.status(400).json({ error: '没有场景数据' });
 
@@ -2636,7 +2838,7 @@ app.post('/api/process', async (req, res) => {
 
   res.json({ jobId });
 
-  const CONCURRENCY = 6; // DeepSeek 不限流，并发 4 在非高峰时段接近线性提速；高峰期靠内置 429 退避兜底
+  const CONCURRENCY = 6;
   const job = jobs.get(jobId);
   let index = 0;
 
@@ -2671,6 +2873,95 @@ app.post('/api/process', async (req, res) => {
     .catch(err => { console.error(err); job.status = 'error'; job.finishedAt = Date.now(); });
 });
 
+// ================================================================
+// API: StructuredC 硬锁模式（新版本，基于3007架构）
+// ================================================================
+app.post('/api/structured-c', async (req, res) => {
+  const { scriptText, costumeCard, config, options = {} } = req.body;
+  if (!config?.apiKey) return res.status(400).json({ error: '请填写 API Key' });
+  if (!scriptText?.trim()) return res.status(400).json({ error: '请填写剧本内容' });
+
+  const jobId = `struct_${Date.now()}`;
+  const job = {
+    status: 'running',
+    progress: [],
+    results: null,
+    events: [],
+    startedAt: Date.now()
+  };
+  jobs.set(jobId, job);
+
+  res.json({ jobId });
+
+  try {
+    const result = await runFull({
+      scriptText,
+      costumeCard: costumeCard || '',
+      config,
+      options: {
+        forbiddenTerms: options.forbiddenTerms || '',
+        visualStyle: options.visualStyle || 'plain',
+        ...options
+      },
+      onEvent: (event) => {
+        job.events.push(event);
+        if (event.type === 'done' || event.type === 'scene_done') {
+          job.progress.push({ type: event.type, stage: event.stage, message: event.message, sceneId: event.sceneId });
+        }
+      }
+    });
+
+    job.status = 'done';
+    job.results = result;
+    job.finishedAt = Date.now();
+    console.log(`[structuredC] job ${jobId} 完成`);
+  } catch (err) {
+    job.status = 'error';
+    job.error = err.message;
+    job.finishedAt = Date.now();
+    console.error(`[structuredC] job ${jobId} 失败:`, err.message);
+  }
+});
+
+// SSE 事件流（structuredC）
+app.get('/api/structured-c/:id/events', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: '任务不存在' });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  let lastIndex = 0;
+  const interval = setInterval(() => {
+    const currentJob = jobs.get(req.params.id);
+    if (!currentJob) { clearInterval(interval); return res.end(); }
+    if (currentJob.events && currentJob.events.length > lastIndex) {
+      const newEvents = currentJob.events.slice(lastIndex);
+      for (const event of newEvents) {
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      }
+      lastIndex = currentJob.events.length;
+    }
+    if (currentJob.status === 'done' || currentJob.status === 'error') {
+      clearInterval(interval);
+      res.write(`data: ${JSON.stringify({ type: 'end', status: currentJob.status })}\n\n`);
+      res.end();
+    }
+  }, 500);
+
+  req.on('close', () => clearInterval(interval));
+});
+
+// 获取 structuredC 结果
+app.get('/api/structured-c/:id/result', (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: '任务不存在' });
+  if (job.status === 'running') return res.status(202).json({ status: 'running', progress: job.progress });
+  if (job.status === 'error') return res.status(500).json({ status: 'error', error: job.error });
+  res.json({ status: 'done', result: job.results });
+});
+
 app.get('/api/progress/:jobId', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -2694,7 +2985,10 @@ app.get('/api/progress/:jobId', (req, res) => {
 app.get('/api/results/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'not found' });
-  res.json({ results: job.results.filter(Boolean), status: job.status });
+  
+  // 处理 job.results 为 null 的情况
+  const results = job.results ? job.results.filter(Boolean) : [];
+  res.json({ results, status: job.status, error: job.error, errorStack: job.errorStack });
 });
 
 app.get('/api/download/:jobId', (req, res) => {

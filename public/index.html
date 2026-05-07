@@ -1053,7 +1053,13 @@ async function startGenerateFromAgentA() {
     const res = await fetch('/api/process', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scenes: agentAState.scenes, costumeCard, config })
+      body: JSON.stringify({
+        scriptText: agentAState.scriptText || '',
+        annotatedScript: agentAState.annotatedScript || '',
+        scenes: agentAState.scenes,
+        costumeCard,
+        config
+      })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
@@ -1079,6 +1085,11 @@ async function handleDirectUpload(input) {
   nameEl.classList.remove('hidden');
 
   showStatus('directUploadStatus', 'info', '正在解析文件...');
+
+  // 读取文件内容作为 scriptText
+  const fileText = await file.text();
+  directState.scriptText = fileText;
+
   const form = new FormData();
   form.append('file', file);
   try {
@@ -1119,7 +1130,12 @@ async function startDirectGenerate() {
     const res = await fetch('/api/process', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scenes: directState.scenes, costumeCard, config })
+      body: JSON.stringify({
+        scriptText: directState.scriptText || '',
+        scenes: directState.scenes,
+        costumeCard,
+        config
+      })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
