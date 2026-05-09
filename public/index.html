@@ -263,25 +263,47 @@ let directState = {
 // ============================================================
 (async function init() {
   renderLayout('layoutContainer', 'tool');
+
+  const urlParams = new URLSearchParams(window.location.search);
+  const debugMode = urlParams.get('debug') === 'true';
+  
   try {
-    const res = await fetch('/api/auth/me');
-    if (!res.ok) { window.location.href = '/login.html'; return; }
-    const user = await res.json();
-    const avatar = document.getElementById('userAvatar');
-    const name = document.getElementById('userName');
-    const role = document.getElementById('userRole');
-    if (avatar) avatar.textContent = user.username ? user.username.charAt(0).toUpperCase() : '?';
-    if (name) name.textContent = user.username || '未知用户';
-    if (role) {
-      if (user.isAdmin) {
+    if (!debugMode) {
+      const res = await fetch('/api/auth/me');
+      if (!res.ok) { window.location.href = '/login.html'; return; }
+      const user = await res.json();
+      const avatar = document.getElementById('userAvatar');
+      const name = document.getElementById('userName');
+      const role = document.getElementById('userRole');
+      if (avatar) avatar.textContent = user.username ? user.username.charAt(0).toUpperCase() : '?';
+      if (name) name.textContent = user.username || '未知用户';
+      if (role) {
+        if (user.isAdmin) {
+          role.textContent = '管理员';
+          role.className = 'user-role admin';
+        } else {
+          role.textContent = '普通用户';
+          role.className = 'user-role';
+        }
+      }
+    } else {
+      // 调试模式：跳过登录验证，使用模拟用户
+      const avatar = document.getElementById('userAvatar');
+      const name = document.getElementById('userName');
+      const role = document.getElementById('userRole');
+      if (avatar) avatar.textContent = 'D';
+      if (name) name.textContent = '调试用户';
+      if (role) {
         role.textContent = '管理员';
         role.className = 'user-role admin';
-      } else {
-        role.textContent = '普通用户';
-        role.className = 'user-role';
       }
     }
-  } catch (_) { window.location.href = '/login.html'; return; }
+  } catch (_) { 
+    if (!debugMode) {
+      window.location.href = '/login.html'; 
+      return; 
+    }
+  }
 
   const mainContent = document.getElementById('mainContent');
   const pageContent = document.getElementById('pageContent');
