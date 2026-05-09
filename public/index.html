@@ -32,7 +32,7 @@
         <label>API 类型</label>
         <select id="apiType" onchange="onApiTypeChange()">
           <option value="anthropic">Anthropic Claude</option>
-          <option value="openai">OpenAI 兼容</option>
+          <option value="openai" selected>OpenAI 兼容</option>
           <option value="gemini">Google Gemini</option>
           <option value="minimax">MiniMax</option>
         </select>
@@ -45,8 +45,8 @@
             <option value="claude-opus-4-6">Claude Opus 4.6</option>
             <option value="claude-haiku-4-5-20251001">Claude Haiku 4.5</option>
           </optgroup>
-          <optgroup label="OpenAI 兼容" id="modelGroupOai" style="display:none">
-            <option value="deepseek-chat">DeepSeek Chat</option>
+          <optgroup label="OpenAI 兼容" id="modelGroupOai">
+            <option value="deepseek-chat" selected>DeepSeek Chat</option>
             <option value="deepseek-reasoner">DeepSeek Reasoner</option>
           </optgroup>
           <optgroup label="Google Gemini" id="modelGroupGemini" style="display:none">
