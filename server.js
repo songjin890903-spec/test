@@ -14,6 +14,7 @@ const {
 const { parseScript: parseScriptFromLib, manifestToText, dialogueTable } = require('./lib/parser');
 const { planSceneSegments, segmentPlanToText } = require('./lib/segmentPlanner');
 const { cleanAgentAForC, cleanAgentBForC } = require('./lib/cleaners');
+const { runAgentC: pipelineRunAgentC, runFull: pipelineRunFull } = require('./lib/pipeline');
 const express = require('express');
 const multer = require('multer');
 const mammoth = require('mammoth');
@@ -177,8 +178,8 @@ async function runAgentC({ scriptText, annotatedScript = '', costumeCard = '', c
 async function runFull({ scriptText, directorNotes = '', mode = 'ai', config, options = {}, onEvent }) {
   const emit = makeEmitter(onEvent);
   emit({ type: 'start', stage: 'FULL', message: `开始全流程：A → B → C(${TOOL_VERSION}硬锁输出)` });
-  // 暂时跳过A/B阶段，直接用runAgentC
-  const c = await runAgentC({ scriptText, annotatedScript: '', costumeCard: '', config, options, onEvent });
+  // 使用 pipeline.js 的 runAgentC（含 Batch Enrich）
+  const c = await pipelineRunAgentC({ scriptText, annotatedScript: '', costumeCard: '', config, options, onEvent });
   emit({ type: 'done', stage: 'FULL', message: '全流程完成' });
   return { manifest: c.manifest, agentC: c };
 }
@@ -2770,7 +2771,7 @@ app.post('/api/process', async (req, res) => {
     res.json({ jobId });
 
     try {
-      const result = await runAgentC({
+      const result = await pipelineRunAgentC({
         scriptText,
         annotatedScript: annotatedScript || '',
         costumeCard: costumeCard || '',

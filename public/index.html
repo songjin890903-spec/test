@@ -168,6 +168,7 @@ textarea { resize: vertical; min-height: 80px; }
         <select id="apiType" onchange="onApiTypeChange()">
           <option value="anthropic">Anthropic Claude</option>
           <option value="openai">OpenAI 兼容</option>
+          <option value="deepseek" selected>DeepSeek</option>
           <option value="gemini">Google Gemini</option>
           <option value="minimax">MiniMax</option>
         </select>
@@ -182,6 +183,10 @@ textarea { resize: vertical; min-height: 80px; }
           </optgroup>
           <optgroup label="OpenAI 兼容" id="modelGroupOai" style="display:none">
             <option value="deepseek-chat">DeepSeek Chat</option>
+            <option value="deepseek-reasoner">DeepSeek Reasoner</option>
+          </optgroup>
+          <optgroup label="DeepSeek" id="modelGroupDeepSeek" style="display:none">
+            <option value="deepseek-chat" selected>DeepSeek Chat（推荐）</option>
             <option value="deepseek-reasoner">DeepSeek Reasoner</option>
           </optgroup>
           <optgroup label="Google Gemini" id="modelGroupGemini" style="display:none">
@@ -480,12 +485,14 @@ function onApiTypeChange() {
   // 切换模型下拉框的选项组
   document.getElementById('modelGroupClaude').style.display = apiType === 'anthropic' ? '' : 'none';
   document.getElementById('modelGroupOai').style.display = apiType === 'openai' ? '' : 'none';
+  document.getElementById('modelGroupDeepSeek').style.display = apiType === 'deepseek' ? '' : 'none';
   document.getElementById('modelGroupGemini').style.display = apiType === 'gemini' ? '' : 'none';
   document.getElementById('modelGroupMiniMax').style.display = apiType === 'minimax' ? '' : 'none';
   // 自动选中对应组的第一个选项
   const defaultModel = {
     anthropic: 'claude-sonnet-4-6',
     openai: 'deepseek-chat',
+    deepseek: 'deepseek-chat',
     gemini: 'gemini-2.5-pro',
     minimax: 'MiniMax-M2'
   }[apiType];
@@ -495,6 +502,7 @@ function onApiTypeChange() {
   const placeholders = {
     anthropic: '留空=https://api.anthropic.com / 或填中转站',
     openai: '例如 https://api.deepseek.com/v1/chat/completions',
+    deepseek: '留空=https://api.deepseek.com（DeepSeek官方）',
     gemini: '留空=https://generativelanguage.googleapis.com / 或填中转站',
     minimax: '留空=https://api.minimax.chat/v1'
   };
