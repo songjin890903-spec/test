@@ -84,3 +84,23 @@
   >> 实际请求URL: https://api.deepseek.com/chat/completions
 [2026-05-10T13:23:15.804Z] provider=deepseek, model=deepseek-chat, baseUrl=(default)
   >> 实际请求URL: https://api.deepseek.com/chat/completions
+[2026-05-10T14:13:12.455Z] provider=deepseek, model=deepseek-chat, baseUrl=(default)
+  >> 实际请求URL: https://api.deepseek.com/chat/completions
+[2026-05-10T14:13:31.243Z] provider=deepseek, model=deepseek-chat, baseUrl=(default)
+  >> 实际请求URL: https://api.deepseek.com/chat/completions
+[2026-05-10T14:13:50.424Z] provider=deepseek, model=deepseek-chat, baseUrl=(default)
+  >> 实际请求URL: https://api.deepseek.com/chat/completions
+[2026-05-10T14:14:07.218Z] provider=deepseek, model=deepseek-chat, baseUrl=(default)
+  >> 实际请求URL: https://api.deepseek.com/chat/completions
+[2026-05-10T14:14:23.211Z] provider=deepseek, model=deepseek-chat, baseUrl=(default)
+  >> 实际请求URL: https://api.deepseek.com/chat/completions
+[2026-05-10T14:17:21.792Z] provider=deepseek, model=deepseek-chat, baseUrl=(default)
+  >> 实际请求URL: https://api.deepseek.com/chat/completions
+[2026-05-10T14:17:33.917Z] provider=deepseek, model=deepseek-chat, baseUrl=(default)
+  >> 实际请求URL: https://api.deepseek.com/chat/completions
+[2026-05-10T14:17:47.457Z] provider=deepseek, model=deepseek-chat, baseUrl=(default)
+  >> 实际请求URL: https://api.deepseek.com/chat/completions
+[2026-05-10T14:17:58.097Z] provider=deepseek, model=deepseek-chat, baseUrl=(default)
+  >> 实际请求URL: https://api.deepseek.com/chat/completions
+[2026-05-10T14:18:10.207Z] provider=deepseek, model=deepseek-chat, baseUrl=(default)
+  >> 实际请求URL: https://api.deepseek.com/chat/completions
