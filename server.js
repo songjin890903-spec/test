@@ -290,18 +290,18 @@ function loadPrompt(filename) {
   }
 }
 
-// ✨ 规划阶段专用：只加载 core.txt 的前半部分（到 PLAN_CUT 标记为止）
+// ✨ 规划阶段专用：只加载 core_v2.txt 的前半部分（到 PLAN_CUT 标记为止）
 // 目的：规划阶段不需要写作铁律·模板填写铁律·文戏 34 条等内容·截掉它们能让规划 API 输入减少约 80%
-// 规划速度预计提升 2-3 倍·写作质量不受影响（写作阶段仍加载完整 core.txt）
+// 规划速度预计提升 2-3 倍·写作质量不受影响（写作阶段仍加载完整 core_v2.txt）
 const _planCoreCache = {};
 function loadCoreForPlan() {
   if (_planCoreCache.content !== undefined) return _planCoreCache.content;
-  const fullCore = loadPrompt('core.txt');
+  const fullCore = loadPrompt('core_v2.txt');
   const PLAN_CUT_MARKER = '<!-- PLAN_CUT';
   const cutIndex = fullCore.indexOf(PLAN_CUT_MARKER);
   if (cutIndex === -1) {
     // 兜底：找不到标记就加载完整 core·避免规划阶段崩溃
-    console.warn('⚠️ core.txt 未找到 PLAN_CUT 标记·规划阶段退回完整加载');
+    console.warn('⚠️ core_v2.txt 未找到 PLAN_CUT 标记·规划阶段退回完整加载');
     _planCoreCache.content = fullCore;
     return fullCore;
   }
@@ -316,10 +316,10 @@ function loadCoreForPlan() {
 }
 
 function buildSystemPrompt(sceneType, options = {}) {
-  // ✨ 加载现有真实文件（core.txt / wenxi.txt / wuxi.txt）
+  // ✨ 加载现有真实文件（core_v2.txt / wenxi.txt / wuxi.txt）
   // 注意：原代码加载的 core_v7.txt / wenxi_core_v7.txt / wuxi_v7.txt 均不存在，
   // 导致 system prompt 为空，写作规则全部靠 user message 里重复注入，token 浪费严重。
-  const core = loadPrompt('core.txt');
+  const core = loadPrompt('core_v2.txt');
   if (sceneType === 'wuxi') return core + '\n\n' + loadPrompt('wuxi.txt');
 
   // 文戏/混合：加载 wenxi.txt（含铁律 34 条 + 声画分离补充铁律 + 范例）
@@ -980,7 +980,7 @@ function extractDirectorKeywords(sceneContent) {
   return [...keywords];
 }
 
-// 构建规划阶段的 prompt（只用 core.txt，不加 wenxi/wuxi，减少 token 压力）
+// 构建规划阶段的 prompt（只用 core_v2.txt，不加 wenxi/wuxi，减少 token 压力）
 function buildPlanPrompt(scene, costumeCard, dialogues) {
   const budgetLines = dialogues.map((d, i) => {
     const min = calcMinDuration(d);
