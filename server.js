@@ -123,13 +123,13 @@ async function repairStructuredIfNeeded({ config, system, scene, segment, raw, p
 }
 
 // runAgentC: 使用 structuredC 硬锁模式生成视频提示词
-async function runAgentC({ scriptText, annotatedScript = '', costumeCard = '', config, options = {}, onEvent }) {
+async function runAgentC({ scriptText, annotatedScript = '', costumeCard = '', config, options = {}, onEvent, directorNotes = '' }) {
   const emit = makeEmitter(onEvent);
   const DEFAULT_FORBIDDEN_TERMS = [
     '绿云大厦', '城市燃烧', '旧世界', '审判者', '绿云AI', '绿云系统',
     '全息投影', '悬浮屏幕', '透明屏幕', '手势操控', '量子传输'
   ];
-  
+
   // 使用 lib/parser.js 的 parseScript，它会正确设置 scene.dialogues
   const manifest = parseScriptFromLib(scriptText);
   const parserHandoff = buildParserDialogueHandoff(manifest);
@@ -146,13 +146,13 @@ async function runAgentC({ scriptText, annotatedScript = '', costumeCard = '', c
     const system = ''; // structuredC硬锁模式不需要system prompt
     const segments = planSceneSegments(scene, options);
     emit({ type: "plan", stage: "PLANNER", sceneId: scene.id, message: `事件分段规划锁定：${segments.length}段（${segments.map(x => x.id + ":" + x.dialogueIds.join(",")).join(" / ")}）`, report: { ok: true, sceneId: scene.id, summary: segmentPlanToText(scene, segments) } });
-    
+
     const renderedSegments = [];
     const internalSegments = [];
     const segmentReports = [];
     for (const segment of segments) {
       emit({ type: 'model_start', stage: 'AGENT_C', sceneId: scene.id, message: `生成片段${segment.id}硬锁版：跳过C模型自由写作，按parser账本直接渲染` });
-      const skeleton = createSegmentSkeleton(scene, segment, cleanB, options.visualStyle || 'plain');
+      const skeleton = createSegmentSkeleton(scene, segment, cleanB, options.visualStyle || 'plain', { directorNotes });
       const parsed = mergeWithSkeleton({}, skeleton);
       const report = validateSegmentJson(scene, segment, parsed, { forbiddenTerms });
       segmentReports.push({ segmentId: segment.id, ...report, summary: summarizeStructuredReport(report) });
@@ -179,7 +179,7 @@ async function runFull({ scriptText, directorNotes = '', mode = 'ai', config, op
   const emit = makeEmitter(onEvent);
   emit({ type: 'start', stage: 'FULL', message: `开始全流程：A → B → C(${TOOL_VERSION}硬锁输出)` });
   // 使用 pipeline.js 的 runAgentC（含 Batch Enrich）
-  const c = await pipelineRunAgentC({ scriptText, annotatedScript: '', costumeCard: '', config, options, onEvent });
+  const c = await pipelineRunAgentC({ scriptText, annotatedScript: '', costumeCard: '', config, options, onEvent, directorNotes });
   emit({ type: 'done', stage: 'FULL', message: '全流程完成' });
   return { manifest: c.manifest, agentC: c };
 }
@@ -2714,6 +2714,17 @@ app.get('/', (req, res) => {
     if (job.status === 'running') activeList.push({ id: id.slice(0, 12), scenes: job.total });
   }
   console.log(`[健康检查] jobs=${jobs.size} agentA=${agentAJobs.size} 活跃=${activeJobs} ${activeList.length > 0 ? '→ ' + activeList.map(j => j.id).join(',') : '(空闲)'}`);
+// 根路径默认返回 index.html（运营后台）
+res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Railway 健康检查（Railway 10s 超时）
+app.get('/health', (req, res) => {
+  const activeJobs = jobs.size + agentAJobs.size;
+  const activeList = [];
+  for (const [id, job] of jobs) {
+    if (job.status === 'running') activeList.push({ id: id.slice(0, 12), scenes: job.total });
+  }
   res.json({
     status: 'ok',
     uptime: process.uptime(),
@@ -2750,7 +2761,13 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 });
 
 app.post('/api/process', async (req, res) => {
-  const { scriptText, annotatedScript, scenes, costumeCard, config, options = {} } = req.body;
+  const { scriptText, annotatedScript, scenes, costumeCard, config, options = {}, directorNotes = '', mappedSegments = [] } = req.body;
+
+  // ===== 从 mappedSegments 提取导演段数 ======
+  const directorSegmentCount = Array.isArray(mappedSegments) ? mappedSegments.length : 0;
+  const directorSegmentIntents = Array.isArray(mappedSegments)
+    ? mappedSegments.map(s => s.text || '').slice(0, 50)
+    : [];
 
   // ===== 新调用链：使用 scriptText + runAgentC() =====
   if (scriptText) {
@@ -2776,9 +2793,12 @@ app.post('/api/process', async (req, res) => {
         annotatedScript: annotatedScript || '',
         costumeCard: costumeCard || '',
         config,
+        directorNotes,
         options: {
           forbiddenTerms: options.forbiddenTerms || '',
           visualStyle: options.visualStyle || 'plain',
+          directorSegmentCount,      // 导演讲戏映射段数 → 分片下限
+          directorSegmentIntents,    // 导演镜头意图列表 → 片段标题
           ...options
         },
         onEvent: (event) => {
@@ -2878,7 +2898,7 @@ app.post('/api/process', async (req, res) => {
 // API: StructuredC 硬锁模式（新版本，基于3007架构）
 // ================================================================
 app.post('/api/structured-c', async (req, res) => {
-  const { scriptText, costumeCard, config, options = {} } = req.body;
+  const { scriptText, costumeCard, config, options = {}, directorNotes = '' } = req.body;
   if (!config?.apiKey) return res.status(400).json({ error: '请填写 API Key' });
   if (!scriptText?.trim()) return res.status(400).json({ error: '请填写剧本内容' });
 
@@ -2897,6 +2917,7 @@ app.post('/api/structured-c', async (req, res) => {
   try {
     const result = await runFull({
       scriptText,
+      directorNotes,
       costumeCard: costumeCard || '',
       config,
       options: {
