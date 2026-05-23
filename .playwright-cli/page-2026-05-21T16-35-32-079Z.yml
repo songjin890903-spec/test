@@ -1,0 +1,20 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - generic:
+      - generic: 01001101 10110100 01101001 11010010 00110101
+      - generic: SYSTEM INIT LOADING READY EXECUTE
+      - generic: 11010101 00101101 10110110 01101001 11010010
+      - generic: CONNECT OK NODE ACTIVE DATA SYNC
+    - generic [ref=e4]: 01010111 11010101 00101101 10110110 SYNC:ACTIVE NODE:ONLINE SEC:OK
+    - generic [ref=e5]: SYS.INIT LOAD.CORE RUN.AGENT OK
+    - img "Logo" [ref=e9]
+    - generic [ref=e10]: "[ SYSTEM ONLINE · READY ]"
+  - generic [ref=e11]:
+    - heading "账号登录" [level=1] [ref=e12]
+    - generic [ref=e13]:
+      - generic [ref=e14]: 账号
+      - textbox "请输入账号（最多15位）" [ref=e15]
+    - generic [ref=e16]:
+      - generic [ref=e17]: 密码
+      - textbox "请输入密码（至少6位）" [ref=e18]
+    - button "登 录" [ref=e19] [cursor=pointer]

@@ -1,20 +1,14 @@
 const annotationV7 = require('./annotation_v7');
 const {
-  buildSegmentJsonUser,
-  extractJson,
-  extractJsonDetailed,
-  validateSegmentJson,
-  summarizeStructuredReport,
-  renderSegment,
-  buildStructuredRepairPrompt,
-  createSegmentSkeleton,
-  mergeWithSkeleton,
-  TOOL_VERSION
-} = require('./lib/structuredC');
-const { parseScript: parseScriptFromLib, manifestToText, dialogueTable } = require('./lib/parser');
-const { planSceneSegments, segmentPlanToText } = require('./lib/segmentPlanner');
-const { cleanAgentAForC, cleanAgentBForC } = require('./lib/cleaners');
-const { runAgentC: pipelineRunAgentC, runFull: pipelineRunFull } = require('./lib/pipeline');
+  createJobRecord,
+  markJobFailed,
+  collectProcessJobEvent,
+  collectStructuredJobEvent,
+  runUnifiedPipelineJob,
+  buildUnifiedFlowInput
+} = require('./lib/pipelineJobs');
+const { runProcessJobWithLegacyScenes } = require('./lib/legacyProcessRunner');
+const { createLegacySceneProcessor } = require('./lib/legacySceneProcessor');
 const express = require('express');
 const multer = require('multer');
 const mammoth = require('mammoth');
@@ -70,119 +64,6 @@ function extractWenxiKeyRules(raw) {
 
 const WENXI_RULES = extractWenxiKeyRules(WENXI_RAW);
 const WUXI_RULES  = WUXI_RAW; // wuxi.txt 较小，直接使用全文
-
-// ================================================================
-// StructuredC helper functions (from 3007)
-// ================================================================
-
-function buildParserDialogueHandoff(manifest) {
-  const lines = [];
-  lines.push("");
-  lines.push("═══════════════════════════════════");
-  lines.push("【台词清单·交接AGENT_C用】");
-  lines.push("（系统自动生成，来自本地 parser；AGENT_A 不负责重写此账本。）");
-  lines.push("═══════════════════════════════════");
-  lines.push("说明：以下台词编号、说话人、VO/OS、原文均为硬锁定账本，后续 B/C/Planner/Validator 以此为准。");
-  lines.push("最终即梦版会隐藏编号；编号只用于内部防漏、防错配。");
-  for (const scene of manifest.scenes || []) {
-    lines.push("");
-    lines.push(("场景" + scene.id + "：" + (scene.header || "")).trim());
-    lines.push(dialogueTable(scene) || "无台词");
-  }
-  lines.push("═══════════════════════════════════");
-  return lines.join("\n");
-}
-
-function makeEmitter(onEvent) {
-  return (event) => {
-    if (onEvent) onEvent({ time: new Date().toISOString(), ...event });
-  };
-}
-
-async function repairStructuredIfNeeded({ config, system, scene, segment, raw, parsed, report, maxRepair = 1, emit, forbiddenTerms, options = {} }) {
-  let currentRaw = raw;
-  let currentParsed = parsed;
-  let currentReport = report;
-  for (let i = 0; i < maxRepair && !currentReport.ok; i++) {
-    emit?.({ type: 'repair', stage: 'AGENT_C', sceneId: scene.id, message: `片段${segment.id}结构校验未通过：${summarizeStructuredReport(currentReport)}，开始第${i + 1}次局部JSON修复` });
-    const user = buildStructuredRepairPrompt({ scene, segment, originalJsonText: currentRaw, report: currentReport });
-    const { callModel } = require('./aiClient');
-    currentRaw = await callModel({ config, system, user, temperature: 0.05, maxTokens: Math.min(config.maxTokens || 8192, 8192) });
-    const detail = extractJsonDetailed(currentRaw);
-    if (!detail.ok) {
-      currentParsed = null;
-      currentReport = { ok: false, errors: { parseErrors: ['JSON解析失败：' + detail.error] } };
-      continue;
-    }
-    const skeleton = createSegmentSkeleton(scene, segment, options.cleanB || '', options.visualStyle || 'plain');
-    currentParsed = mergeWithSkeleton(detail.value, skeleton);
-    currentRaw = JSON.stringify(currentParsed, null, 2);
-    currentReport = validateSegmentJson(scene, segment, currentParsed, { forbiddenTerms });
-  }
-  return { raw: currentRaw, parsed: currentParsed, report: currentReport };
-}
-
-// runAgentC: 使用 structuredC 硬锁模式生成视频提示词
-async function runAgentC({ scriptText, annotatedScript = '', costumeCard = '', config, options = {}, onEvent, directorNotes = '' }) {
-  const emit = makeEmitter(onEvent);
-  const DEFAULT_FORBIDDEN_TERMS = [
-    '绿云大厦', '城市燃烧', '旧世界', '审判者', '绿云AI', '绿云系统',
-    '全息投影', '悬浮屏幕', '透明屏幕', '手势操控', '量子传输'
-  ];
-
-  // 使用 lib/parser.js 的 parseScript，它会正确设置 scene.dialogues
-  const manifest = parseScriptFromLib(scriptText);
-  const parserHandoff = buildParserDialogueHandoff(manifest);
-  const cleanA = cleanAgentAForC(annotatedScript, parserHandoff);
-  const cleanB = cleanAgentBForC(costumeCard);
-  const forbiddenTerms = [...DEFAULT_FORBIDDEN_TERMS, ...String(options.forbiddenTerms || '').split(/[、,，\n]/).map(s => s.trim()).filter(Boolean)];
-  const selectedScenes = options.sceneIds?.length ? new Set(options.sceneIds) : null;
-  const scenes = manifest.scenes.filter(s => !selectedScenes || selectedScenes.has(s.id));
-  emit({ type: 'parse', stage: 'AGENT_C', message: `C ${TOOL_VERSION}硬锁准备：${scenes.length}场；程序锁片段/台词/镜头/输出白名单，默认不让模型重写C结构` });
-
-  const sceneOutputs = [];
-  const sceneReports = [];
-  for (const scene of scenes) {
-    const system = ''; // structuredC硬锁模式不需要system prompt
-    const segments = planSceneSegments(scene, options);
-    emit({ type: "plan", stage: "PLANNER", sceneId: scene.id, message: `事件分段规划锁定：${segments.length}段（${segments.map(x => x.id + ":" + x.dialogueIds.join(",")).join(" / ")}）`, report: { ok: true, sceneId: scene.id, summary: segmentPlanToText(scene, segments) } });
-
-    const renderedSegments = [];
-    const internalSegments = [];
-    const segmentReports = [];
-    for (const segment of segments) {
-      emit({ type: 'model_start', stage: 'AGENT_C', sceneId: scene.id, message: `生成片段${segment.id}硬锁版：跳过C模型自由写作，按parser账本直接渲染` });
-      const skeleton = createSegmentSkeleton(scene, segment, cleanB, options.visualStyle || 'plain', { directorNotes });
-      const parsed = mergeWithSkeleton({}, skeleton);
-      const report = validateSegmentJson(scene, segment, parsed, { forbiddenTerms });
-      segmentReports.push({ segmentId: segment.id, ...report, summary: summarizeStructuredReport(report) });
-      renderedSegments.push(renderSegment(parsed));
-      internalSegments.push(JSON.stringify(parsed, null, 2));
-      emit({ type: 'scene_done', stage: 'AGENT_C', sceneId: scene.id, message: `片段${segment.id}完成：${summarizeStructuredReport(report)}`, report });
-      if (!report.ok && options.failFast !== false) {
-        throw new Error(`片段${segment.id}未通过校验，已停止继续生成：${summarizeStructuredReport(report)}`);
-      }
-    }
-    const ok = segmentReports.every(r => r.ok);
-    sceneOutputs.push({ sceneId: scene.id, header: scene.header, sceneType: scene.sceneType, content: renderedSegments.join('\n\n---\n\n'), internalContent: internalSegments.join('\n\n---\n\n') });
-    sceneReports.push({ sceneId: scene.id, ok, segments: segmentReports, summary: ok ? '通过' : segmentReports.map(r => `${r.segmentId}:${r.summary}`).join('；') });
-  }
-  const output = sceneOutputs.map(s => `═══════════════════════════════════\n场景 ${s.sceneId} ${s.header}\n═══════════════════════════════════\n\n${s.content}`).join('\n\n');
-  const internalOutput = sceneOutputs.map(s => `═══════════════════════════════════\n场景 ${s.sceneId} ${s.header}\n═══════════════════════════════════\n\n${s.internalContent}`).join('\n\n');
-  const ok = sceneReports.every(r => r.ok);
-  emit({ type: 'done', stage: 'AGENT_C', message: ok ? 'AGENT_C结构化完成且校验通过' : 'AGENT_C结构化完成但仍有校验问题', report: sceneReports });
-  return { manifest, output, internalOutput, report: { ok, scenes: sceneReports }, sceneOutputs };
-}
-
-// runFull: 全流程 A → B → C
-async function runFull({ scriptText, directorNotes = '', mode = 'ai', config, options = {}, onEvent }) {
-  const emit = makeEmitter(onEvent);
-  emit({ type: 'start', stage: 'FULL', message: `开始全流程：A → B → C(${TOOL_VERSION}硬锁输出)` });
-  // 使用 pipeline.js 的 runAgentC（含 Batch Enrich）
-  const c = await pipelineRunAgentC({ scriptText, annotatedScript: '', costumeCard: '', config, options, onEvent, directorNotes });
-  emit({ type: 'done', stage: 'FULL', message: '全流程完成' });
-  return { manifest: c.manifest, agentC: c };
-}
 
 const app = express();
 const PORT = process.env.PORT || 3006;
@@ -506,6 +387,122 @@ function stripDirectorNotes(text) {
   }
   _stripCache.set(text, stripped);
   return stripped;
+}
+
+// ============================================================
+// 算法化修复：导演批注语义解析（供 prompt 注入）
+// ============================================================
+
+/**
+ * 从导演批注中提取稳帧点指令
+ * 匹配模式：稳帧点：...停X秒
+ * 返回格式化字符串，供注入 prompt
+ */
+function extractStableFrames(sceneContent) {
+  if (!sceneContent) return '';
+  const frames = [];
+  // 匹配【镜头意图】稳帧点：...停X秒
+  const regex = /稳帧点[：:]\s*([^\n]+?停\s*[0-9.]+\s*秒)/g;
+  let m;
+  while ((m = regex.exec(sceneContent)) !== null) {
+    frames.push(m[1].trim());
+  }
+  if (!frames.length) return '';
+  return `【稳帧点指令（导演批注·必须执行）】\n${frames.map((f, i) => `${i + 1}. ${f}——必须在C部分对应镜头写出【定格停留X秒】`).join('\n')}\n（以上稳帧点必须在C部分镜号叙事中明确写出停留时长，不能省略）\n`;
+}
+
+/**
+ * 从导演批注中提取道具状态变化
+ * 匹配模式：XX被YY（吹灭/掉落/破碎/点燃等）
+ * 返回 must-appear 列表
+ */
+function extractPropStateChanges(sceneContent) {
+  if (!sceneContent) return '';
+  const changes = [];
+  // 匹配：道具 + 被/被 + 动作动词
+  const regex = /([一-龥]{1,6}?)被([一-龥]{1,4}?)(吹灭|掉落|破碎|点燃|熄灭|翻倒|震碎|撕裂|烧毁|腐蚀)/g;
+  let m;
+  while ((m = regex.exec(sceneContent)) !== null) {
+    changes.push(`${m[1]}被${m[2]}${m[3]}`);
+  }
+  // 也匹配：大风/狂风 + 把 + 道具 + 动作
+  const regex2 = /([狂大]风).*?把([一-龥]{1,6}?)(吹灭|吹倒|吹翻|卷走)/g;
+  while ((m = regex2.exec(sceneContent)) !== null) {
+    changes.push(`${m[2]}被${m[3]}`);
+  }
+  if (!changes.length) return '';
+  return `【道具状态变化（导演批注·必须出现）】\n${changes.map((c, i) => `${i + 1}. ${c}——必须在C部分某镜号中写出`).join('\n')}\n`;
+}
+
+/**
+ * 从场景动作文本中提取语义位置规则
+ * 分析动词-宾语关系，区分"容器"与"手持道具"
+ * 返回 prompt 注入字符串
+ */
+function extractSemanticLocationRules(sceneContent) {
+  if (!sceneContent) return '';
+  const containers = new Set();
+  const handhelds = new Set();
+  // 容器动词：走进/躺入/进入/钻入/缩入
+  const containerVerbs = /走进|躺入|进入|钻入|缩入|躲入|沉入|埋入/;
+  // 手持动词：拿起/抱/持/握/拎/抓/取/捧
+  const handheldVerbs = /拿起|抱起|手持|握住|拎着|抓住|取出|捧住|怀揣|怀揣|携带|握住/;
+  // 简单提取：动词 + 的/了 + 宾语
+  const sentences = sceneContent.split(/[，。！？；\n]/);
+  for (const s of sentences) {
+    const trimmed = s.trim();
+    if (!trimmed) continue;
+    // 容器匹配
+    const cMatch = trimmed.match(new RegExp(`(${containerVerbs.source}).*?([一-龥]{1,6})`));
+    if (cMatch) containers.add(cMatch[2]);
+    // 手持匹配
+    const hMatch = trimmed.match(new RegExp(`(${handheldVerbs.source}).*?([一-龥]{1,6})`));
+    if (hMatch) handhelds.add(hMatch[2]);
+  }
+  // 从导演讲戏中提取
+  const directorBlocks = [];
+  processDirectorNotes(sceneContent, (full, inner) => {
+    directorBlocks.push(inner);
+    return '';
+  });
+  for (const block of directorBlocks) {
+    const sentences = block.split(/[，。！？；\n]/);
+    for (const s of sentences) {
+      const trimmed = s.trim();
+      if (!trimmed) continue;
+      const cMatch = trimmed.match(new RegExp(`(${containerVerbs.source}).*?([一-龥]{1,6})`));
+      if (cMatch) containers.add(cMatch[2]);
+      const hMatch = trimmed.match(new RegExp(`(${handheldVerbs.source}).*?([一-龥]{1,6})`));
+      if (hMatch) handhelds.add(hMatch[2]);
+    }
+  }
+  // 去重并过滤
+  const containerList = [...containers].filter(c => c.length >= 2 && !/的|了|在|是|被/.test(c));
+  const handheldList = [...handhelds].filter(h => h.length >= 2 && !/的|了|在|是|被/.test(h));
+  if (!containerList.length && !handheldList.length) return '';
+  let rules = '【B部分人物位置语义规则（必须遵守）】\n';
+  if (handheldList.length) {
+    rules += `- 以下道具是手持/怀抱的，人物位置关系必须写"持有${handheldList.join('、')}"，绝对禁止写"位于${handheldList.join('、')}内部"。\n`;
+  }
+  if (containerList.length) {
+    rules += `- 以下物件是容器，人物可以"位于${containerList.join('、')}内部"。\n`;
+  }
+  rules += '- 通用铁律：只有"走进/躺入/进入"的容器才能写"位于XX内部"；"拿起/抱/持/握"的道具一律写"持有XX"。\n';
+  return rules;
+}
+
+/**
+ * A画面物理系统去重：场景级只保留第一个片段的A部分
+ * 从第2个片段开始，移除【A】画面物理系统块（保留第一个）
+ */
+function deduplicateABlocks(outputs) {
+  if (!Array.isArray(outputs) || outputs.length <= 1) return outputs;
+  const A_BLOCK_RE = /【A】画面物理系统[：:]?\n?[\s\S]*?(?=\n【[B-F]】|$)/;
+  return outputs.map((seg, idx) => {
+    if (idx === 0) return seg; // 第一个片段保留A
+    // 第2个及以后：移除A块
+    return seg.replace(A_BLOCK_RE, '').replace(/\n{3,}/g, '\n\n').trim();
+  });
 }
 
 // ============================================================
@@ -1768,6 +1765,14 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
     }
   }
 
+  // 算法化注入：稳帧点 + 道具状态变化 + 语义位置规则
+  const stableFrameHint = extractStableFrames(scene.content);
+  if (stableFrameHint) p += stableFrameHint + '\n';
+  const propChangeHint = extractPropStateChanges(scene.content);
+  if (propChangeHint) p += propChangeHint + '\n';
+  const semanticLocHint = extractSemanticLocationRules(scene.content);
+  if (semanticLocHint) p += semanticLocHint + '\n';
+
   p += `⛔⛔⛔ 最优先铁律·防止指令泄漏（违反即整条输出作废）：\n`;
   p += `以下所有规则是对你输出的【约束】，不是 C 部分的【内容】。\n`;
   p += `禁止把任何规则文字、格式要求，元说明、"每个段落必须 XX"、"⚠️ XX 必须 YY"、"（⚠️ XX）"这类祈使句或括号元说明·写进最终输出里。\n`;
@@ -1846,7 +1851,8 @@ function buildSegmentPrompt(scene, segPlan, costumeCard, prevTailFrame, segIndex
 
   // 参考 A 部分参数（稳定，场景级一次生成，所有片段共享）
   if (refA) {
-    p += `═══ 【A部分参数（必须原样使用，不得修改）】═══\n${refA}\n\n`;
+    p += `═══ 【A部分参数（场景级·已锁定·所有片段共享）】═══\n${refA}\n\n`;
+    p += `⛔ 本片段已有场景级A部分参数，输出时【绝对不要重复输出A部分】。直接从【B】当前场记状态开始写。A部分只在场景第一个片段出现一次。\n\n`;
   }
 
   // ══════════════════════════════════════════════════════════
@@ -1939,43 +1945,33 @@ function generateScenePlanBlock(plan, scene, dialogues) {
   return `<scene_plan>\n${text}\n</scene_plan>`;
 }
 
-// ── 场景进度辅助：携带子步骤供前端渲染进度条 ──────────────────
-// steps 固定四项：规划 / A参数 / 写作 / 验证
-// doneCount = 已完成数量（0-4）；当前 active = doneCount 那一项
-function setSceneProgress(job, idx, sceneId, status, message, doneCount = 0) {
-  const STEP_NAMES = ['规划', 'A参数', '写作', '验证'];
-  const now = Date.now();
-  if (!job.progress[idx]) {
-    job.progress[idx] = { sceneId, status, message, steps: [] };
-  }
-  if (!job.progress[idx].steps || job.progress[idx].steps.length === 0) {
-    job.progress[idx].steps = STEP_NAMES.map((name, i) => ({
-      name,
-      done: false,
-      active: false,
-      startTime: null,
-      endTime: null
-    }));
-  }
-  for (let i = 0; i < STEP_NAMES.length; i++) {
-    const step = job.progress[idx].steps[i];
-    if (i < doneCount) {
-      step.done = true;
-      step.active = false;
-      if (!step.endTime) step.endTime = now;
-    } else if (i === doneCount && status === 'processing') {
-      step.done = false;
-      step.active = true;
-      if (!step.startTime) step.startTime = now;
-    } else {
-      step.done = false;
-      step.active = false;
-    }
-  }
-  job.progress[idx].sceneId = sceneId;
-  job.progress[idx].status = message;
-  job.progress[idx].message = message;
-}
+const legacySceneProcessor = createLegacySceneProcessor({
+  buildSystemPrompt,
+  loadCoreForPlan,
+  extractDialogues,
+  extractDirectorShots,
+  SCENE_RULES,
+  calcMinDuration,
+  callAPI,
+  buildPlanPrompt,
+  parsePlan,
+  forceInjectMissingDialogues,
+  validatePlan,
+  validatePlanSegmentSimilarity,
+  validatePlanUniqueness,
+  countBigMovement,
+  SEG_CHECK_RE,
+  buildSegmentPrompt,
+  verifyDialogues,
+  repairMissingDialogues,
+  generateScenePlanBlock,
+  filterBatchPrompts,
+  deduplicateABlocks,
+  extractDirectorKeywords,
+  processDirectorNotes,
+  WENXI_RULES,
+  WUXI_RULES
+});
 
 // 多步处理一个场景：规划 → 逐片段写作
 async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex) {
@@ -2516,6 +2512,9 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
     console.log(`✓ ${scene.id} 全场景镜头时长检测通过`);
   }
 
+  // A画面物理系统去重：只保留第一个片段的A部分
+  outputs = deduplicateABlocks(outputs);
+
   // 重新生成 finalOutput（补写可能修改了 outputs）
   let finalOutput = scenePlanBlock + '\n\n' + outputs.join('\n\n');
 
@@ -2538,170 +2537,6 @@ async function processSceneMultiStep(scene, costumeCard, config, job, sceneIndex
   return finalOutput;
 }
 
-// 降级方案：单次生成（规划彻底失败时使用）
-async function processSceneSingleShot(scene, costumeCard, config, job, sceneIndex, systemPrompt, dialogues) {
-  job.progress[sceneIndex] = {
-    sceneId: scene.id, status: 'processing', message: '生成中（单次模式，最长5分钟）...'
-  };
-
-  let userMsg = `请为以下场景生成完整的视频提示词。\n\n`;
-  userMsg += `【场景信息】\n场景编号：${scene.id}\n场景地点：${scene.location || '见剧本'}\n`;
-  userMsg += `出场角色：${scene.characters.join('、') || '见剧本'}\n`;
-  userMsg += `⚠️ @声明必须填入实际内容：@${scene.characters.join(' @')} @${scene.location || '场景地点'}\n\n`;
-
-  // 台词时长预算：程序算好直接给模型，不需要模型自己算
-  if (dialogues.length > 0) {
-    userMsg += `⛔ 程序预算：本场台词最短时长（含台词的镜号时长必须≥对应值）\n`;
-    userMsg += `  （语速规则：普通台词4字/秒；激动/急促/恐慌/颤音6字/秒；呻吟/喘息3字/秒；OS/VO独白2字/秒；逗号+0.4秒，句末。！？+0.7秒）\n`;
-    dialogues.forEach((d, i) => {
-      const min = calcMinDuration(d);
-      userMsg += `[台词${i + 1}] ${d}  →  最短${min}秒\n`;
-    });
-    userMsg += `\n`;
-  }
-
-  userMsg += `⛔⛔⛔ 最优先铁律·防止指令泄漏（违反即整条输出作废）：\n`;
-  userMsg += `以下所有规则是对你输出的【约束】，不是 C 部分的【内容】。\n`;
-  userMsg += `禁止把任何规则文字、格式要求、元说明、"⚠️ XX 必须 YY"、"（⚠️ XX）"这类祈使句或括号元说明·写进最终输出里。\n`;
-  userMsg += `C 部分只写画面叙事——摄影机运动 + 人物动作 + 台词 + （物理反馈）。\n`;
-  userMsg += `不要在镜号之前或 C 部分开头加任何"格式声明"、"写法要求"、"规则说明"。\n`;
-  userMsg += `不要用"（⚠️ ...）"或"（注：...）"或"（说明：...）"在 C 部分正文里出现。\n\n`;
-
-  userMsg += `⛔ 强制执行规则（逐条执行，不得跳过）：\n`;
-  userMsg += `1. C部分所有内容必须100%来自剧本原文，禁止自创任何动作、对话或场景。\n`;
-  userMsg += `2. 剧本中▲开头的每一个动作必须在C部分对应镜号里出现，不得跳过或合并。\n`;
-  userMsg += `3. 所有台词必须是剧本原文，一字不得改动，禁止自行创作台词。\n`;
-  userMsg += `4. （导演讲戏：...）括号内优先级标注"必须补"或"⚠️必须"的内容，必须生成对应的独立镜号或片段。\n`;
-  userMsg += `5. 如果导演讲戏里有Cold Open或特殊开场指令且标注"必须补"，必须作为第一个片段的前置镜号输出。\n`;
-  userMsg += `6. 【镜头意图】稳帧点要求的每一帧，必须在对应镜号叙事里明确写出停帧时长。\n`;
-  userMsg += `7. 【镜头意图】INSERT要求的特写画面，必须作为独立镜号出现在C部分，不得合并进其他镜号。\n`;
-  userMsg += `8. 动笔写任何片段的C部分之前，必须先在analysis块【台词分配表】里逐条列出本片段所有台词和OS独白（包括原文），标注计划写入哪个镜号；写完后逐句回标"已在镜X使用"，有遗漏禁止输出。\n`;
-  userMsg += `9. OS独白必须以"角色OS：引号原文"格式写进对应镜号叙事正文，不能只写画面描述而省略OS文字。\n`;
-  userMsg += `9b. ⚠️ VO/画外音/旁白 台词严禁输出成独立的"（台词）：..."行——必须写成"角色VO/OS：台词原文（从听筒/画外传出）"的形式，融入某个镜号的叙事正文里。\n`;
-  userMsg += `10. ⚠️ 每个片段镜号时长之和不得超过15秒。台词多/导演指令多时增加片段数量，不要硬塞。\n`;
-  userMsg += `11. ⚠️ 台词之间必须有反应镜头（1-2秒）：角色A说完后，不要直接接角色B的台词。中间插一个听者反应的镜号。反应镜头也占时间，装不下就多分一个片段。\n`;
-  userMsg += `12. 导演批注里描述的具体动作不能改——"漂移甩尾"不能改成"直冲"。\n`;
-  userMsg += `13. ⚠️ 每片段字数预算（超1800字即梦会截断）：A≤200字·B≤200字·C≤1000字·D+E+F≤400字。\n`;
-  userMsg += `14. A部分格式统一：所有片段的A部分用相同格式，不加方括号，参数用·分隔。\n`;
-  userMsg += `15. 导演标注了⚠️/一定要/必须的内容，C部分叙事中必须明确体现（如"重音"→写"刻意加重咬字"）。\n`;
-  userMsg += `16. 导演描述的连贯走位调度放在同一个片段，不拆开。\n`;
-  userMsg += `17. ⚠️ 镜号格式铁律：每个镜号以 [景别] 开头·后接复合运镜指令·焦段写在镜号头部或描述里。${scene.sceneType === 'wuxi' ? '武戏用英文景别如 [大特写 (Extreme Close-up)]' : '文戏用中文景别如 [近景]·[中近景]·[过肩]'}。\n`;
-  userMsg += `18. ⚠️ 三层缝合：第一层叙事+第二层摄影机运动（有情绪/力的理由）+第三层（）物理反馈，缺一不可。空壳镜号禁止输出。\n`;
-  userMsg += `19. ⚠️ 禁止输出任何元注释、解释性文字、压缩说明、AI思考过程、操作说明。只输出提示词正文。\n`;
-  userMsg += `20. ⚠️ 镜号内容唯一性：每个镜号的画面内容必须独特，禁止两个镜号描写完全相同的动作、状态或构图。相邻镜号必须有明确的视觉差异。\n`;
-  userMsg += `21. ⚠️ 台词时长匹配：带台词（含OS/VO）的镜号，台词量必须与时长匹配。中文对白约3-5字/秒。2秒及以下的镜号，台词必须极简。\n`;
-
-  // ── 武戏专属规则（方案A：读取 wuxi.txt） ──
-  if (scene.sceneType === 'wuxi') {
-    userMsg += `\n【武戏专项规则】\n${WUXI_RULES}\n`;
-  }
-
-  // ── 文戏专属规则（含混合场景）（方案A：读取 wenxi.txt + 保留旧结构指令） ──
-  if (scene.sceneType !== 'wuxi') {
-    userMsg += `\n【文戏专项规则】\n`;
-    userMsg += `⚠️ 以下规则来自 wenxi.txt 铁律，与结构指令配合使用。\n\n`;
-    userMsg += `${WENXI_RULES}\n\n`;
-    // 补充旧文1-文11中 wenxi.txt 没有的关键输出指令
-    userMsg += `【文戏输出格式强制要求】（上述铁律必须通过以下格式体现）：\n`;
-    userMsg += `文1. ⚠️ 台词三拍结构（重量台词必用）：情绪拐点句/决绝句/摊牌句必须写三拍——拍一组织动作（台词前·视线从A移到B）+ 拍二说台词（一句话内有2-3个视线落点）+ 拍三消化动作（台词后身体反应）。⛔ 禁止"张嘴念完就闭嘴"。\n`;
-    userMsg += `文2. ⚠️ 台词顺序铁律：台词必须按剧本顺序逐字使用，禁止打乱顺序。\n`;
-    userMsg += `文2-1. ⚠️ 严禁跨镜号偷台词：镜N只能使用本镜号应用的台词，禁止把后面镜号的台词提前写到前面镜号，也禁止把前面镜号的台词重复写到后面。\n`;
-    userMsg += `文3. ⚠️ 听者身体反应：说话人说完立刻切走拍听者（上半身后靠/手停了/肩缩了），不是只拍脸。说话人不能连续占两个以上镜号。\n`;
-    userMsg += `文4. ⚠️ 混合场景按文戏规则写——武戏动作当作"情绪驱动肢体"，镜头保持克制。\n`;
-    userMsg += `文5. ⚠️ 镜号内容唯一性：每个镜号的画面内容必须独特，禁止两个镜号描写完全相同的动作、状态或构图。相邻镜号必须有明确的视觉差异（景别/角度/焦段/主体至少一项不同）。\n`;
-    userMsg += `文6. ⚠️ 台词时长匹配：带台词（含OS/VO/声画分离）的镜号，台词量必须与时长匹配。中文对白经验值：3-5字/秒。台词较长时，必须改为声画分离（VO继续+画面切其他）或拆分到多个镜号。2秒及以下的镜号，台词描述必须极简（≤10字）。\n`;
-
-  }
-
-  // 检测转场指令
-  if (scene.content.includes('转场') || scene.content.includes('无缝衔接')) {
-    userMsg += `\n⚠️ 导演指定了转场方式，最后一个片段的最后一镜必须完成转场设计，不能截断。\n`;
-  }
-  userMsg += `\n`;
-
-  // 提取⚠️强调清单
-  const mustItemsSS = [];
-  processDirectorNotes(scene.content, (match, inner) => {
-    for (const line of inner.split('\n')) {
-      if (line.includes('⚠️') || line.includes('一定要') || line.includes('必须')) {
-        mustItemsSS.push(line.trim());
-      }
-    }
-    return match;
-  });
-  if (mustItemsSS.length > 0) {
-    userMsg += `【导演⚠️强调清单（写完后逐条检查是否落实）】\n`;
-    mustItemsSS.forEach((item, i) => { userMsg += `[强调${i + 1}] ${item}\n`; });
-    userMsg += `\n`;
-  }
-
-  userMsg += `═══ AGENT_A 批注剧本 ═══\n${scene.content}\n\n`;
-  userMsg += `⚠️ 注意：剧本正文到此结束。以下【批注摘要】及所有 ═══ 分隔线是元数据（统计信息），不是剧本内容，不要处理、不要补写、不要输出，只输出到最后一个【片段11-1?】结束即可。\n\n`;
-  if (costumeCard && costumeCard.trim()) {
-    userMsg += `═══ AGENT_B 服化道卡 ═══\n${costumeCard}\n\n`;
-  }
-  userMsg += `\n⚠️ 禁止输出任何元注释、解释性文字、压缩说明、AI思考过程、操作说明。只输出提示词正文。\n`;
-  userMsg += `请直接输出所有15秒片段的完整提示词，台词多时自动拆分，全部片段一次性输出。`;
-
-  let result = await callAPI(systemPrompt, userMsg, config);
-
-  if (dialogues.length > 0) {
-    const missing = verifyDialogues(dialogues, result);
-    if (missing.length > 0) {
-      result = await repairMissingDialogues(missing, result, systemPrompt, config);
-    }
-    // 补写后再检一次
-    const finalMissing = verifyDialogues(dialogues, result);
-    if (finalMissing.length > 0) {
-      console.warn(`⚠️ ${scene.id} 单次模式台词总检：补写后仍有 ${finalMissing.length} 条遗漏：`);
-      finalMissing.forEach((d, i) => console.warn(`   遗漏${i + 1}：${d.slice(0, 40)}...`));
-    } else {
-      console.log(`✓ ${scene.id} 单次模式台词总检通过，${dialogues.length} 条台词全部落实`);
-    }
-  }
-
-  // 单次模式15秒/片段检查（警告，不阻断）
-  const segDurMatches = result.match(/【片段\S+】[\s\S]*?(?=【片段|$)/g) || [result];
-  const SHOT_DUR_RE_SS = /镜\d+\s+(\d+(?:\.\d+)?)\s*s/g;
-  for (let si = 0; si < segDurMatches.length; si++) {
-    const segText = segDurMatches[si];
-    const segTotal = Array.from(segText.matchAll(SHOT_DUR_RE_SS), m => parseFloat(m[1]))
-      .reduce((sum, d) => sum + d, 0);
-    if (segTotal > 15.5) {
-      console.warn(`⚠️ ${scene.id} 单次模式片段${si + 1}：总时长 ${segTotal}s 超过15秒铁律上限`);
-    } else if (segTotal > 0) {
-      console.log(`✓ ${scene.id} 单次模式片段${si + 1}：时长 ${segTotal}s，合格`);
-    }
-  }
-
-  // ── 单次模式单镜号台词时长检测 ─────────────────────────────────
-  const ssShotWarnings = [];
-  const SHOT_DIALOGUE_RE_SS = /镜(\d+)\s+(\d+(?:\.\d+)?)\s*s[^·]*·[^·]*·dialogue:"([^"]+)"/g;
-  let match;
-  while ((match = SHOT_DIALOGUE_RE_SS.exec(result)) !== null) {
-    const shotNum = match[1];
-    const shotDur = parseFloat(match[2]);
-    const dialogue = match[3];
-    const minDur = calcMinDuration(dialogue);
-    if (minDur > shotDur) {
-      ssShotWarnings.push(`镜${shotNum}：台词"${dialogue.slice(0, 15)}..."需${minDur}秒，分配${shotDur}秒`);
-    }
-  }
-  if (ssShotWarnings.length > 0) {
-    console.warn(`⚠️ ${scene.id} 单次模式单镜号台词时长不足：`);
-    ssShotWarnings.forEach(w => console.warn(`   ${w}`));
-  }
-
-  // ── 字数统计（保留【A】+【B】+【C】+【D】+【E】+【F】<=1800检测）─────────
-  const ssCharCount = result.replace(/<analysis>[\s\S]*?<\/analysis>/g, '').trim().length;
-  console.log(`📊 ${scene.id} 单次模式字数统计：${ssCharCount}字 ${ssCharCount <= 1800 ? '✅' : '❌ 超标'}`);
-
-  // ── 过滤分批提示信息 ─────────────────────────────────
-  result = filterBatchPrompts(result);
-
-  return result;
-}
-
 // ============================================================
 // 路由
 // ============================================================
@@ -2714,8 +2549,8 @@ app.get('/', (req, res) => {
     if (job.status === 'running') activeList.push({ id: id.slice(0, 12), scenes: job.total });
   }
   console.log(`[健康检查] jobs=${jobs.size} agentA=${agentAJobs.size} 活跃=${activeJobs} ${activeList.length > 0 ? '→ ' + activeList.map(j => j.id).join(',') : '(空闲)'}`);
-// 根路径默认返回 index.html（运营后台）
-res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  // 根路径默认返回 index.html（运营后台）
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 // Railway 健康检查（Railway 10s 超时）
@@ -2763,84 +2598,42 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 app.post('/api/process', async (req, res) => {
   const { scriptText, annotatedScript, scenes, costumeCard, config, options = {}, directorNotes = '', mappedSegments = [] } = req.body;
 
-  // ===== 从 mappedSegments 提取导演段数 ======
-  const directorSegmentCount = Array.isArray(mappedSegments) ? mappedSegments.length : 0;
-  const directorSegmentIntents = Array.isArray(mappedSegments)
-    ? mappedSegments.map(s => s.text || '').slice(0, 50)
-    : [];
-
-  // ===== 新调用链：使用 scriptText + runAgentC() =====
+  // ===== 新调用链：使用 scriptText + unified pipeline =====
   if (scriptText) {
     if (!config?.apiKey) return res.status(400).json({ error: '请填写 API Key' });
 
     const jobId = `job_${Date.now()}`;
-    const job = {
-      status: 'running',
-      progress: [],
-      results: null,
-      events: [],
-      startedAt: Date.now(),
-      total: 0,
-      completed: 0
-    };
+    const job = createJobRecord();
     jobs.set(jobId, job);
 
     res.json({ jobId });
 
-    try {
-      const result = await pipelineRunAgentC({
-        scriptText,
-        annotatedScript: annotatedScript || '',
-        costumeCard: costumeCard || '',
-        config,
-        directorNotes,
-        options: {
-          forbiddenTerms: options.forbiddenTerms || '',
-          visualStyle: options.visualStyle || 'plain',
-          directorSegmentCount,      // 导演讲戏映射段数 → 分片下限
-          directorSegmentIntents,    // 导演镜头意图列表 → 片段标题
-          ...options
+    runUnifiedPipelineJob({
+        jobId,
+        job,
+        label: 'process',
+        flowInput: buildUnifiedFlowInput({
+          scriptText,
+          annotatedScript,
+          costumeCard,
+          config,
+          options,
+          directorNotes,
+          mappedSegments
+        }),
+        onEvent: collectProcessJobEvent,
+        mapResult: (result) => {
+          const sceneOutputs = result.agentC?.sceneOutputs || result.sceneOutputs || [];
+          return sceneOutputs.map(s => ({
+            sceneId: s.sceneId,
+            sceneHeader: s.header,
+            sceneType: s.sceneType,
+            content: s.content
+          }));
         },
-        onEvent: (event) => {
-          job.events.push(event);
-          // 映射事件到进度格式
-          if (event.type === 'plan' && event.stage === 'PLANNER') {
-            job.progress.push({
-              sceneId: event.sceneId,
-              status: 'processing',
-              message: event.message || '规划中...'
-            });
-            job.total = (job.total || 0) + 1;
-          }
-          if (event.type === 'scene_done' && event.stage === 'AGENT_C') {
-            const idx = job.progress.findIndex(p => p.sceneId === event.sceneId);
-            if (idx >= 0) {
-              job.progress[idx].status = event.report?.ok ? 'done' : 'error';
-              job.progress[idx].message = event.message || '';
-            }
-            job.completed = job.progress.filter(p => p.status === 'done' || p.status === 'error').length;
-          }
-        }
-      });
-
-      // 映射 sceneOutputs 到 results 格式
-      job.status = 'done';
-      job.results = (result.sceneOutputs || []).map(s => ({
-        sceneId: s.sceneId,
-        sceneHeader: s.header,
-        sceneType: s.sceneType,
-        content: s.content
-      }));
-      job.finishedAt = Date.now();
-      console.log(`[process] job ${jobId} 完成，共 ${job.results.length} 场`);
-    } catch (err) {
-      job.status = 'error';
-      job.error = err.message;
-      job.errorStack = err.stack;
-      job.finishedAt = Date.now();
-      console.error(`[process] job ${jobId} 失败:`, err.message);
-      console.error(err.stack);
-    }
+        doneMessage: '完成'
+      })
+      .catch(err => markJobFailed({ job, jobId, label: 'process', err }));
     return;
   }
 
@@ -2849,100 +2642,59 @@ app.post('/api/process', async (req, res) => {
   if (!scenes?.length) return res.status(400).json({ error: '没有场景数据' });
 
   const jobId = `job_${Date.now()}`;
-  jobs.set(jobId, {
-    status: 'running',
+  jobs.set(jobId, createJobRecord({
     progress: scenes.map(s => ({ sceneId: s.id, status: 'pending', message: '等待中' })),
     results: new Array(scenes.length).fill(null),
     total: scenes.length,
     completed: 0
-  });
+  }));
 
   res.json({ jobId });
 
-  const CONCURRENCY = 6;
   const job = jobs.get(jobId);
-  let index = 0;
-
-  async function runNext() {
-    if (index >= scenes.length) return;
-    const i = index++;
-    const scene = scenes[i];
-
-    try {
-      const result = await processSceneMultiStep(scene, costumeCard, config, job, i);
-      setSceneProgress(job, i, scene.id, 'done', '完成 ✓', 4);
-      job.results[i] = {
-        sceneId: scene.id, sceneHeader: scene.header,
-        sceneType: scene.sceneType, episode: scene.episode, content: result
-      };
-    } catch (err) {
-      setSceneProgress(job, i, scene.id, 'error', `错误: ${err.message}`, 0);
-      job.results[i] = {
-        sceneId: scene.id, sceneHeader: scene.header,
-        sceneType: scene.sceneType, episode: scene.episode,
-        content: `[生成失败: ${err.message}]`
-      };
-    }
-
-    job.completed++;
-    await runNext();
-  }
-
-  const workers = Array(Math.min(CONCURRENCY, scenes.length)).fill(null).map(() => runNext());
-  Promise.all(workers)
-    .then(() => { job.status = 'done'; job.finishedAt = Date.now(); })
-    .catch(err => { console.error(err); job.status = 'error'; job.finishedAt = Date.now(); });
+  console.warn(`[process] job ${jobId} 使用 legacy scenes fallback；建议客户端改为传 scriptText 走统一管道`);
+  runProcessJobWithLegacyScenes({
+    job,
+    scenes,
+    costumeCard,
+    config,
+    processScene: legacySceneProcessor.processSceneMultiStep,
+    setSceneProgress: legacySceneProcessor.setSceneProgress
+  })
+    .catch(err => markJobFailed({ job, jobId, label: 'process', err }));
 });
 
 // ================================================================
 // API: StructuredC 硬锁模式（新版本，基于3007架构）
 // ================================================================
 app.post('/api/structured-c', async (req, res) => {
-  const { scriptText, costumeCard, config, options = {}, directorNotes = '' } = req.body;
+  const { scriptText, annotatedScript = '', costumeCard, config, options = {}, directorNotes = '', mode = 'ai' } = req.body;
   if (!config?.apiKey) return res.status(400).json({ error: '请填写 API Key' });
   if (!scriptText?.trim()) return res.status(400).json({ error: '请填写剧本内容' });
 
   const jobId = `struct_${Date.now()}`;
-  const job = {
-    status: 'running',
-    progress: [],
-    results: null,
-    events: [],
-    startedAt: Date.now()
-  };
+  const job = createJobRecord();
   jobs.set(jobId, job);
 
   res.json({ jobId });
 
-  try {
-    const result = await runFull({
-      scriptText,
-      directorNotes,
-      costumeCard: costumeCard || '',
-      config,
-      options: {
-        forbiddenTerms: options.forbiddenTerms || '',
-        visualStyle: options.visualStyle || 'plain',
-        ...options
-      },
-      onEvent: (event) => {
-        job.events.push(event);
-        if (event.type === 'done' || event.type === 'scene_done') {
-          job.progress.push({ type: event.type, stage: event.stage, message: event.message, sceneId: event.sceneId });
-        }
-      }
-    });
-
-    job.status = 'done';
-    job.results = result;
-    job.finishedAt = Date.now();
-    console.log(`[structuredC] job ${jobId} 完成`);
-  } catch (err) {
-    job.status = 'error';
-    job.error = err.message;
-    job.finishedAt = Date.now();
-    console.error(`[structuredC] job ${jobId} 失败:`, err.message);
-  }
+  runUnifiedPipelineJob({
+      jobId,
+      job,
+      label: 'structuredC',
+      flowInput: buildUnifiedFlowInput({
+        scriptText,
+        annotatedScript,
+        costumeCard,
+        config,
+        options,
+        directorNotes,
+        mode
+      }),
+      onEvent: collectStructuredJobEvent,
+      doneMessage: '完成'
+    })
+    .catch(err => markJobFailed({ job, jobId, label: 'structuredC', err }));
 });
 
 // SSE 事件流（structuredC）

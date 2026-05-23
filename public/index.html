@@ -208,7 +208,7 @@ textarea { resize: vertical; min-height: 80px; }
     <div class="form-row">
       <div style="flex:2">
         <label>API Key</label>
-        <input type="password" id="apiKey" placeholder="sk-...">
+        <input type="password" id="apiKey" value="sk-1a5aa3376fb04902a286b15d1ea9330a" placeholder="sk-...">
       </div>
       <div id="apiUrlWrap">
         <label>API URL（留空用默认，可填中转站）</label>
@@ -386,16 +386,12 @@ let agentAState = {
   annotatedScript: null,
   scenes: null,
   annotateJobId: null,
-  annotateStartTime: null,  // 批注开始时间
+  annotateStartTime: null,
   generateJobId: null,
-  analysisMode: 'ai',  // 'ai' or 'director'
+  analysisMode: 'ai',
   directorNotes: null,
-  mappedSegments: null,  // 映射结果
-  sceneOptions: null     // 场景列表供下拉选择
-};
-let directState = {
-  scenes: null,
-  jobId: null
+  mappedSegments: null,
+  sceneOptions: null
 };
 
 // ============================================================
@@ -530,16 +526,6 @@ async function handleAgentAUpload(input) {
   const file = input.files[0];
   if (!file) return;
 
-  // ⚠️ 上传新剧本时重置所有旧状态，防止残留数据造成标题/内容错乱
-  agentAState.scriptText = null;
-  agentAState.scenes = null;
-  agentAState.annotatedScript = null;
-  agentAState.annotateJobId = null;
-  agentAState.generateJobId = null;
-  agentAState.mappedSegments = null;
-  agentAState.sceneOptions = null;
-  agentAState.directorNotes = null;
-
   const nameEl = document.getElementById('agentAFileName');
   nameEl.textContent = `已选择：${file.name}`;
   nameEl.classList.remove('hidden');
@@ -552,6 +538,7 @@ async function handleAgentAUpload(input) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
     agentAState.scriptText = data.scriptText;
+    agentAState.scenes = data.scenes || null;
     showStatus('agentAUploadStatus', 'success', `解析成功：${data.charCount} 字，${data.sceneCount} 个场景`);
     // 显示模式选择器
     document.getElementById('analysisModeWrap').classList.remove('hidden');
@@ -1020,6 +1007,11 @@ async function proceedToGenerate() {
 
   const genSection = document.getElementById('agentA_generate');
   genSection.classList.remove('hidden');
+  if (agentAState.scenes?.length) {
+    renderSceneInfo('agentA_sceneInfo', agentAState.scenes);
+    genSection.scrollIntoView({ behavior: 'smooth' });
+    return;
+  }
 
   // 解析批注剧本为场景
   try {
@@ -1066,7 +1058,9 @@ async function startGenerateFromAgentA() {
         annotatedScript: agentAState.annotatedScript || '',
         scenes: agentAState.scenes,
         costumeCard,
-        config
+        config,
+        directorNotes: agentAState.directorNotes || '',
+        mappedSegments: agentAState.mappedSegments || []
       })
     });
     const data = await res.json();
@@ -1088,6 +1082,7 @@ async function startGenerateFromAgentA() {
 async function handleDirectUpload(input) {
   const file = input.files[0];
   if (!file) return;
+
   const nameEl = document.getElementById('directFileName');
   nameEl.textContent = `已选择：${file.name}`;
   nameEl.classList.remove('hidden');
@@ -1140,9 +1135,11 @@ async function startDirectGenerate() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         scriptText: directState.scriptText || '',
+        annotatedScript: directState.scriptText || '',
         scenes: directState.scenes,
         costumeCard,
-        config
+        config,
+        options: { skipAgentA: true }
       })
     });
     const data = await res.json();
@@ -1182,22 +1179,28 @@ function renderSubSteps(steps) {
   return html;
 }
 
+const _genTimers = {};
+
 function pollGenerateProgress(jobId, progressEl, resultEl, btn, mode) {
   const es = new EventSource(`/api/progress/${jobId}`);
+  _genTimers[jobId] = { globalStart: Date.now(), sceneStarts: {}, sceneDurations: {} };
   es.onmessage = (e) => {
     const data = JSON.parse(e.data);
+    const timers = _genTimers[jobId];
     if (data.error) {
-      progressEl.innerHTML = `<div class="status status-error">⚠ ${escapeHtml(data.error)}</div>`;
+      const elapsed = Math.round((Date.now() - timers.globalStart) / 1000);
+      progressEl.innerHTML = `<div class="status status-error">⚠ ${escapeHtml(data.error)}（耗时${elapsed}s）</div>`;
       es.close();
       btn.disabled = false;
       btn.textContent = '开始生成提示词';
       return;
     }
 
-    // 渲染进度
+    // 渲染进度 + 计时
     const pct = data.total ? Math.round((data.completed / data.total) * 100) : 0;
+    const elapsed = Math.round((Date.now() - timers.globalStart) / 1000);
     let html = `<div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>`;
-    html += `<div class="progress-text">${data.completed} / ${data.total} 场景完成</div>`;
+    html += `<div class="progress-text">${data.completed} / ${data.total} 场景完成 | 总耗时 ${elapsed}s</div>`;
 
     // 错误 banner：有任何场景出错立刻显示
     const errScenes = (data.progress || []).filter(p => p.status === 'error');
@@ -1206,21 +1209,30 @@ function pollGenerateProgress(jobId, progressEl, resultEl, btn, mode) {
     }
 
     for (const p of (data.progress || [])) {
+      // 场景计时
+      if (p.status === 'processing' && !timers.sceneStarts[p.sceneId]) timers.sceneStarts[p.sceneId] = Date.now();
+      if (p.status === 'done' && timers.sceneStarts[p.sceneId] && !timers.sceneDurations[p.sceneId]) {
+        timers.sceneDurations[p.sceneId] = Math.round((Date.now() - timers.sceneStarts[p.sceneId]) / 1000);
+      }
+      const sceneElapsed = timers.sceneStarts[p.sceneId] ? Math.round((Date.now() - timers.sceneStarts[p.sceneId]) / 1000) + 's' : '';
+      const sceneDoneElapsed = timers.sceneDurations[p.sceneId] ? timers.sceneDurations[p.sceneId] + 's' : '';
+      const timeStr = p.status === 'processing' ? sceneElapsed : (sceneDoneElapsed || '');
+
       const dotClass = p.status === 'done' ? 'dot-done'
         : p.status === 'error' ? 'dot-error'
         : p.status === 'processing' ? 'dot-processing' : 'dot-pending';
       html += `<div class="progress-item">
         <span class="dot ${dotClass}"></span>
-        <div style="flex:1;min-width:0;">
-          <span style="color:${p.status==='error'?'#fca5a5':'#ccc'}">${escapeHtml(p.sceneId)}</span>
-          <span style="color:#888;font-size:11px;margin-left:6px;">${escapeHtml(p.message || '')}</span>
-          ${renderSubSteps(p.steps)}
-        </div>
-      </div>`;
+        <span style="color:${p.status==='error'?'#fca5a5':'#ccc'}">${escapeHtml(p.sceneId)}</span>`;
+      if (timeStr) html += `<span style="color:#f59e0b;font-size:11px;margin-left:6px;font-family:monospace;">${timeStr}</span>`;
+      html += `<span style="color:#888;font-size:11px;margin-left:6px;">${escapeHtml(p.message||'')}</span>${renderSubSteps(p.steps)}`;
+      html += `</div>`;
     }
     progressEl.innerHTML = html;
 
     if (data.status === 'done') {
+      const totalTime = Math.round((Date.now() - timers.globalStart) / 1000);
+      progressEl.innerHTML = progressEl.innerHTML.replace('场景完成 | 总耗时 ' + elapsed + 's', '场景完成 | 总耗时 ' + totalTime + 's');
       es.close();
       btn.disabled = false;
       btn.textContent = '开始生成提示词';
@@ -1228,6 +1240,7 @@ function pollGenerateProgress(jobId, progressEl, resultEl, btn, mode) {
     }
   };
   es.onerror = () => {
+    const totalTime = _genTimers[jobId] ? Math.round((Date.now() - _genTimers[jobId].globalStart) / 1000) : 0;
     es.close();
     btn.disabled = false;
     btn.textContent = '开始生成提示词';

@@ -44,12 +44,14 @@ function onApiTypeChange() {
   document.getElementById('modelGroupOai').style.display = apiType === 'openai' ? '' : 'none';
   document.getElementById('modelGroupGemini').style.display = apiType === 'gemini' ? '' : 'none';
   document.getElementById('modelGroupMiniMax').style.display = apiType === 'minimax' ? '' : 'none';
-  const defaultModel = { anthropic: 'claude-sonnet-4-6', openai: 'deepseek-chat', gemini: 'gemini-2.5-pro', minimax: 'MiniMax-M2' }[apiType];
+  document.getElementById('modelGroupDeepSeek').style.display = apiType === 'deepseek' ? '' : 'none';
+  const defaultModel = { anthropic: 'claude-sonnet-4-6', openai: 'deepseek-chat', deepseek: 'deepseek-chat', gemini: 'gemini-2.5-pro', minimax: 'MiniMax-M2' }[apiType];
   document.getElementById('model').value = defaultModel;
   document.getElementById('modelCustom').classList.add('hidden');
   const placeholders = {
     anthropic: '留空=https://api.anthropic.com / 或填中转站',
     openai: '例如 https://api.deepseek.com/v1/chat/completions',
+    deepseek: '留空=https://api.deepseek.com/v1 / 或填中转站',
     gemini: '留空=https://generativelanguage.googleapis.com / 或填中转站',
     minimax: '留空=https://api.minimax.chat/v1'
   };
@@ -76,6 +78,7 @@ async function handleAgentAUpload(input) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
     agentAState.scriptText = data.scriptText;
+    agentAState.scenes = data.scenes || null;
     showStatus('agentAUploadStatus', 'success', '解析成功：' + data.charCount + ' 字，' + data.sceneCount + ' 个场景');
     document.getElementById('analysisModeWrap').classList.remove('hidden');
     updateStep1Button();
@@ -358,6 +361,11 @@ async function proceedToGenerate() {
   setStepState('stepGenerate', 'active');
   const genSection = document.getElementById('agentA_generate');
   genSection.classList.remove('hidden');
+  if (agentAState.scenes?.length) {
+    renderSceneInfo('agentA_sceneInfo', agentAState.scenes);
+    genSection.scrollIntoView({ behavior: 'smooth' });
+    return;
+  }
   try {
     const res = await fetch('/api/parse-text', {
       method: 'POST',
@@ -386,7 +394,15 @@ async function startGenerateFromAgentA() {
     const res = await fetch('/api/process', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scenes: agentAState.scenes, costumeCard: document.getElementById('costumeCardA').value.trim(), config })
+      body: JSON.stringify({
+        scenes: agentAState.scenes,
+        scriptText: agentAState.scriptText || '',
+        annotatedScript: agentAState.annotatedScript || '',
+        costumeCard: document.getElementById('costumeCardA').value.trim(),
+        config,
+        directorNotes: agentAState.directorNotes || '',
+        mappedSegments: agentAState.mappedSegments || []
+      })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
@@ -402,6 +418,7 @@ async function handleDirectUpload(input) {
   document.getElementById('directFileName').textContent = '已选择：' + file.name;
   document.getElementById('directFileName').classList.remove('hidden');
   showStatus('directUploadStatus', 'info', '正在解析文件...');
+  directState.scriptText = await file.text();
   const form = new FormData();
   form.append('file', file);
   try {
@@ -430,7 +447,14 @@ async function startDirectGenerate() {
     const res = await fetch('/api/process', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scenes: directState.scenes, costumeCard: document.getElementById('costumeCardD').value.trim(), config })
+      body: JSON.stringify({
+        scriptText: directState.scriptText || '',
+        annotatedScript: directState.scriptText || '',
+        scenes: directState.scenes,
+        costumeCard: document.getElementById('costumeCardD').value.trim(),
+        config,
+        options: { skipAgentA: true }
+      })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
@@ -451,21 +475,46 @@ function renderSubSteps(steps) {
   return h + '</div>';
 }
 
+const _genTimers = {};
+
 function pollGenerateProgress(jobId, progressEl, resultEl, btn, mode) {
   const es = new EventSource('/api/progress/' + jobId);
+  _genTimers[jobId] = { globalStart: Date.now(), sceneStarts: {}, sceneDurations: {} };
   es.onmessage = (e) => {
     const d = JSON.parse(e.data);
-    if (d.error) { progressEl.innerHTML = '<div class="status status-error">⚠ ' + escapeHtml(d.error) + '</div>'; es.close(); btn.disabled = false; btn.textContent = '开始生成提示词'; return; }
+    const timers = _genTimers[jobId];
+    if (d.error) {
+      const elapsed = Math.round((Date.now() - timers.globalStart) / 1000);
+      progressEl.innerHTML = '<div class="status status-error">⚠ ' + escapeHtml(d.error) + '（耗时' + elapsed + 's）</div>'; es.close(); btn.disabled = false; btn.textContent = '开始生成提示词'; return;
+    }
     const pct = d.total ? Math.round((d.completed/d.total)*100) : 0;
-    let html = '<div class="progress-bar"><div class="progress-fill" style="width:' + pct + '%"></div></div><div class="progress-text">' + d.completed + '/' + d.total + ' 场景完成</div>';
+    const elapsed = Math.round((Date.now() - timers.globalStart) / 1000);
+    let html = '<div class="progress-bar"><div class="progress-fill" style="width:' + pct + '%"></div></div><div class="progress-text">' + d.completed + '/' + d.total + ' 场景完成 | 总耗时 ' + elapsed + 's</div>';
     for (const p of (d.progress||[])) {
+      // 场景计时
+      if (p.status === 'processing' && !timers.sceneStarts[p.sceneId]) timers.sceneStarts[p.sceneId] = Date.now();
+      if (p.status === 'done' && timers.sceneStarts[p.sceneId] && !timers.sceneDurations[p.sceneId]) {
+        timers.sceneDurations[p.sceneId] = Math.round((Date.now() - timers.sceneStarts[p.sceneId]) / 1000);
+      }
+      const sceneElapsed = timers.sceneStarts[p.sceneId] ? Math.round((Date.now() - timers.sceneStarts[p.sceneId]) / 1000) + 's' : '';
+      const sceneDoneElapsed = timers.sceneDurations[p.sceneId] ? timers.sceneDurations[p.sceneId] + 's' : '';
+      const timeStr = p.status === 'processing' ? sceneElapsed : (sceneDoneElapsed || '');
       const dot = p.status==='done'?'dot-done':p.status==='error'?'dot-error':p.status==='processing'?'dot-processing':'dot-pending';
-      html += '<div class="progress-item"><span class="dot ' + dot + '"></span><span style="color:' + (p.status==='error'?'#fca5a5':'#ccc') + '">' + escapeHtml(p.sceneId) + '</span><span style="color:#888;font-size:11px;margin-left:6px;">' + escapeHtml(p.message||'') + '</span>' + renderSubSteps(p.steps) + '</div>';
+      html += '<div class="progress-item"><span class="dot ' + dot + '"></span><span style="color:' + (p.status==='error'?'#fca5a5':'#ccc') + '">' + escapeHtml(p.sceneId) + '</span>';
+      if (timeStr) html += '<span style="color:#f59e0b;font-size:11px;margin-left:6px;font-family:monospace;">' + timeStr + '</span>';
+      html += '<span style="color:#888;font-size:11px;margin-left:6px;">' + escapeHtml(p.message||'') + '</span>' + renderSubSteps(p.steps) + '</div>';
     }
     progressEl.innerHTML = html;
-    if (d.status === 'done') { es.close(); btn.disabled = false; btn.textContent = '开始生成提示词'; fetchGenerateResults(jobId, resultEl, mode); }
+    if (d.status === 'done') {
+      const totalTime = Math.round((Date.now() - timers.globalStart) / 1000);
+      progressEl.innerHTML = progressEl.innerHTML.replace('场景完成 | 总耗时 ' + elapsed + 's', '场景完成 | 总耗时 ' + totalTime + 's');
+      es.close(); btn.disabled = false; btn.textContent = '开始生成提示词'; fetchGenerateResults(jobId, resultEl, mode);
+    }
   };
-  es.onerror = () => { es.close(); btn.disabled = false; btn.textContent = '开始生成提示词'; setTimeout(() => fetchGenerateResults(jobId, resultEl, mode), 1000); };
+  es.onerror = () => {
+    const totalTime = _genTimers[jobId] ? Math.round((Date.now() - _genTimers[jobId].globalStart) / 1000) : 0;
+    es.close(); btn.disabled = false; btn.textContent = '开始生成提示词'; setTimeout(() => fetchGenerateResults(jobId, resultEl, mode), 1000);
+  };
 }
 
 async function fetchGenerateResults(jobId, resultEl, mode) {

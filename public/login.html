@@ -758,7 +758,7 @@ async function doLogin() {
     const data = await res.json();
     if (!res.ok) { showError(data.error || '登录失败'); return; }
     showSuccess('登录成功，即将跳转...');
-    setTimeout(() => { window.location.href = '/admin.html'; }, 500);
+    setTimeout(() => { window.location.href = '/index.html'; }, 500);
   } catch (e) {
     showError('网络异常，请稍后重试');
   } finally {
@@ -775,7 +775,7 @@ $('username').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(
 (async () => {
   try {
     const res = await fetch('/api/auth/me');
-    if (res.ok) window.location.href = '/admin.html';
+    if (res.ok) window.location.href = '/index.html';
   } catch (_) {}
 })();
 </script>
