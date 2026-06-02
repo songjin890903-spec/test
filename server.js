@@ -2828,6 +2828,13 @@ function stripMarkdown(text) {
 }
 
 function parseRawScript(text) {
+  // ── 文本归一化：消除格式差异 ──
+  text = text
+    .replace(/[—－]/g, '-')                              // em-dash / 全角连字符 → 半角连字符
+    .replace(/(日|夜|晨|黄昏|傍晚|清晨)\/(内|外|内外)/g, '$1 $2')  // "夜/内" → "夜 内"
+    .replace(/(\d+[-–]\d+[A-Za-z]?)([^\s-])/g, '$1 $2') // "1-2神秘暗室" → "1-2 神秘暗室"
+    .replace(/[ \t]+/g, ' ');                              // 多余空白压缩为单空格
+
   const scenes = [], lines = text.split('\n');
   let cur = null, ep = '01';
   for (const line of lines) {
